@@ -1,5 +1,10 @@
 # Changelog
 
+## fork (laloraj) 1.6.11 — 2026-10-17
+
+- **retag.yml**: image is now upstream 1.6.8 plus our patched `nginx.conf`
+  (1.6.10 only changed source; the retagged image still had the button).
+
 ## fork (laloraj) 1.6.10 — 2026-10-17
 
 - **nginx.conf**: removed the injected floating "Setup Terminal" button.

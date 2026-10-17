@@ -27,12 +27,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Copy manifests to fork namespace
+      - name: Build patched image (upstream + button removal)
         run: |
           VERSION=$(yq eval '.version' hermes_assistant/config.yaml)
-          for arch in amd64 aarch64; do
-            docker buildx imagetools create \
+          cat > Dockerfile.patch <<EOF
+          FROM ghcr.io/nuttaruj/\${TARGETARCH_NAME}-hermes-assistant:${UPSTREAM_TAG}
+          EOF
+          for pair in amd64:linux/amd64 aarch64:linux/arm64; do
+            arch=${pair%%:*}; plat=${pair##*:}
+            printf 'FROM ghcr.io/nuttaruj/%s-hermes-assistant:%s\nCOPY nginx.conf /etc/nginx/nginx.conf\n' "$arch" "$UPSTREAM_TAG" > Dockerfile.patch
+            docker buildx build --platform $plat -f Dockerfile.patch hermes_assistant \
               -t ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} \
-              -t ghcr.io/laloraj/${arch}-hermes-assistant:latest \
-              ghcr.io/nuttaruj/${arch}-hermes-assistant:${UPSTREAM_TAG}
+              -t ghcr.io/laloraj/${arch}-hermes-assistant:latest --push
           done
