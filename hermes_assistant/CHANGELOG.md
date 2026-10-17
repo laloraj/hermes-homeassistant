@@ -1,5 +1,10 @@
 # Changelog
 
+## fork (laloraj) 1.6.10 — 2026-10-17
+
+- **nginx.conf**: removed the injected floating "Setup Terminal" button.
+  The terminal is still reachable at `terminal/`.
+
 ## fork (laloraj) 1.6.9 — 2026-10-17
 
 - **config.yaml**: `hassio_api: true` and `hassio_role: manager`, so Hermes can
