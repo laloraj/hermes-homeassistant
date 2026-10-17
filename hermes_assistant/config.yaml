@@ -1,8 +1,8 @@
-name: Hermes Assistant
+name: "Hermes Assistant (fork: +HA config/addons access)"
 version: "1.6.8"
 slug: hermes_assistant
-description: Hermes AI Agent (NousResearch) with Web UI and setup terminal for Home Assistant
-url: https://github.com/nuttaruj/hermes-homeassistant
+description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with Web UI and setup terminal. This fork additionally maps the real HA /config and /addons folders into the container."
+url: https://github.com/laloraj/hermes-homeassistant
 
 arch:
   - amd64

@@ -1,5 +1,14 @@
 # Hermes Assistant — Home Assistant Add-on
 
+> **🔱 Fork notice:** this is a fork of
+> [nuttaruj/hermes-homeassistant](https://github.com/nuttaruj/hermes-homeassistant)
+> that additionally maps the real HA `/config` directory and the `/addons`
+> store into the container (`homeassistant_config:rw`, `addons:rw`), so Hermes
+> can read/write `configuration.yaml`, `automations.yaml`, etc. directly. The
+> upstream add-on does not expose these. See the main repo README/CHANGELOG
+> for the full diff. This grants the add-on significantly broader access to
+> your HA instance than stock — review before installing.
+
 Runs the [Hermes Agent](https://hermes-agent.nousresearch.com/) (NousResearch)
 with [hermes-webui](https://github.com/nesquena/hermes-webui) inside Home
 Assistant. Includes a setup terminal (ttyd) so you can run `hermes setup` and
