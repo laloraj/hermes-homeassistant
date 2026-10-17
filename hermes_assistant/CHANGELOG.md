@@ -1,5 +1,14 @@
 # Changelog
 
+## fork (laloraj) — 2026-10-17
+
+Fork-only change, not from upstream nuttaruj/hermes-homeassistant.
+
+- **config.yaml**: added `homeassistant_config:rw` and `addons:rw` to `map:`,
+  mounting HA core's real `/config` (configuration.yaml, automations.yaml,
+  etc.) and the `/addons` store into the container so Hermes can read/write
+  them directly. Upstream only maps `addon_config:rw` and `share:rw`.
+
 ## 1.6.8 — 2026-08-15
 
 Close the two gaps 1.6.7's respawn supervisor could not cover.
