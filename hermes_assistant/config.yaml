@@ -51,6 +51,8 @@ watchdog: "http://[HOST]:[PORT:8787]/health"
 map:
   - addon_config:rw
   - share:rw
+  - homeassistant_config:rw
+  - addons:rw
 
 # Skip regenerable artifacts from HA backups (~400-600MB saved).
 # Agent + webui code mirror lives in /data so updates persist, but the
