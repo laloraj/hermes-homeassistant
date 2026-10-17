@@ -1,5 +1,5 @@
 name: "Hermes Assistant (fork: +HA config/addons access)"
-version: "1.6.8"
+version: "1.6.9"
 slug: hermes_assistant
 description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with Web UI and setup terminal. This fork additionally maps the real HA /config and /addons folders into the container."
 url: https://github.com/laloraj/hermes-homeassistant
@@ -12,7 +12,7 @@ arch:
 # substituted by HA Supervisor. If the image is unreachable (e.g. first
 # install before the package was set public), Supervisor falls back to
 # building locally from Dockerfile + build.yaml — slower but never fails.
-image: ghcr.io/nuttaruj/{arch}-hermes-assistant
+image: ghcr.io/laloraj/{arch}-hermes-assistant
 
 startup: services
 boot: auto
@@ -27,7 +27,8 @@ panel_admin: true
 
 # Auto-inject SUPERVISOR_TOKEN so Hermes can call HA without a user-managed LLA.
 homeassistant_api: true
-hassio_api: false
+hassio_api: true
+hassio_role: manager
 
 # Auto-restart by HA if the WebUI health endpoint stops responding.
 #

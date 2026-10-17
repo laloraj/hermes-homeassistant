@@ -1,0 +1,38 @@
+name: Retag upstream image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hermes_assistant/config.yaml"
+      - ".github/workflows/retag.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Upstream image tag to reuse (must exist in ghcr.io/nuttaruj).
+  UPSTREAM_TAG: "1.6.8"
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy manifests to fork namespace
+        run: |
+          VERSION=$(yq eval '.version' hermes_assistant/config.yaml)
+          for arch in amd64 aarch64; do
+            docker buildx imagetools create \
+              -t ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} \
+              -t ghcr.io/laloraj/${arch}-hermes-assistant:latest \
+              ghcr.io/nuttaruj/${arch}-hermes-assistant:${UPSTREAM_TAG}
+          done

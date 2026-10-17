@@ -1,17 +1,7 @@
 name: Build
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-    paths:
-      - "hermes_assistant/**"
-      - ".github/workflows/build.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "hermes_assistant/**"
-      - ".github/workflows/build.yml"
+  # Fork: images are retagged from upstream by retag.yml; full build is manual only.
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref (saves Actions minutes)

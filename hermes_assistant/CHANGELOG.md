@@ -1,5 +1,13 @@
 # Changelog
 
+## fork (laloraj) 1.6.9 — 2026-10-17
+
+- **config.yaml**: `hassio_api: true` and `hassio_role: manager`, so Hermes can
+  start/stop/update add-ons and read logs via the Supervisor API. Version bumped
+  so Supervisor offers the update.
+- **image**: now `ghcr.io/laloraj/{arch}-hermes-assistant`; `.github/workflows/retag.yml`
+  copies the upstream nuttaruj 1.6.8 image to the fork tag (no rebuild).
+
 ## fork (laloraj) — 2026-10-17
 
 Fork-only change, not from upstream nuttaruj/hermes-homeassistant.
