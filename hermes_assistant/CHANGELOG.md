@@ -1,5 +1,10 @@
 # Changelog
 
+## fork (laloraj) 1.6.12 — 2026-10-18
+
+- Start and respawn the messaging gateway (API server on 8642) from run.sh.
+- Use http://homeassistant:8123 instead of homeassistant.local when a user token is set.
+
 ## fork (laloraj) 1.6.11 — 2026-10-17
 
 - **retag.yml**: image is now upstream 1.6.8 plus our patched `nginx.conf`

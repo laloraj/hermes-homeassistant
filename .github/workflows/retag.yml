@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "hermes_assistant/config.yaml"
+      - "hermes_assistant/run.sh"
       - ".github/workflows/retag.yml"
   workflow_dispatch:
 
@@ -35,7 +36,7 @@ jobs:
           EOF
           for pair in amd64:linux/amd64 aarch64:linux/arm64; do
             arch=${pair%%:*}; plat=${pair##*:}
-            printf 'FROM ghcr.io/nuttaruj/%s-hermes-assistant:%s\nCOPY nginx.conf /etc/nginx/nginx.conf\n' "$arch" "$UPSTREAM_TAG" > Dockerfile.patch
+            printf 'FROM ghcr.io/nuttaruj/%s-hermes-assistant:%s\nCOPY nginx.conf /etc/nginx/nginx.conf\nCOPY run.sh /run.sh\nRUN chmod +x /run.sh\n' "$arch" "$UPSTREAM_TAG" > Dockerfile.patch
             docker buildx build --platform $plat -f Dockerfile.patch hermes_assistant \
               -t ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} \
               -t ghcr.io/laloraj/${arch}-hermes-assistant:latest --push

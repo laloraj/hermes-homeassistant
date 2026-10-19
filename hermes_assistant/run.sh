@@ -34,7 +34,7 @@ AUTO_CONFIGURE_MCP=$(bashio::config 'auto_configure_mcp')
 # ─── Resolve HA token: user option > SUPERVISOR_TOKEN ───────────────────────
 if [ -n "${HA_TOKEN_USER}" ]; then
     HA_TOKEN="${HA_TOKEN_USER}"
-    HASS_URL="http://homeassistant.local:8123"
+    HASS_URL="http://homeassistant:8123"
     bashio::log.info "Using user-supplied homeassistant_token (LLA)"
 elif [ -n "${SUPERVISOR_TOKEN:-}" ]; then
     HA_TOKEN="${SUPERVISOR_TOKEN}"
@@ -299,6 +299,25 @@ cd "${WEBUI_DIR}"
 ) &
 WEBUI_SUP_PID=$!
 bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
+
+# ─── Start messaging gateway (background, respawned) ────────────────────────
+# Hosts the API server (port 8642) plus HA/WhatsApp platforms. Nothing else
+# starts it, so without this it stays down after every add-on restart.
+(
+    set +e
+    while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
+    export HERMES_HOME=/data/hermes
+    export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
+    trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
+    while true; do
+        cd /data/hermes
+        hermes gateway run --no-supervise >> /data/hermes/logs/gateway-addon.log 2>&1 &
+        gw=$!
+        wait "${gw}"
+        sleep 10
+    done
+) &
+bashio::log.info "gateway respawn supervisor PID=$!"
 
 # ─── Start ttyd (background, loopback only — nginx fronts it) ───────────────
 if bashio::var.true "${ENABLE_TERMINAL}"; then
