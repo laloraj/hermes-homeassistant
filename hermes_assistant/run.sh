@@ -308,6 +308,13 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
     while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
     export HERMES_HOME=/data/hermes
     export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
+    # Hermes looks for its managed Node at $HERMES_HOME/node/bin before PATH.
+    # Point it at the image's Node so the WhatsApp bridge works without a
+    # second Node install (idempotent; refreshed every boot).
+    if [ -x /opt/hermes-agent/node/bin/node ] && [ ! -e /data/hermes/node/bin/node ]; then
+        rm -rf /data/hermes/node 2>/dev/null || true
+        ln -sfn /opt/hermes-agent/node /data/hermes/node
+    fi
     trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
     while true; do
         cd /data/hermes
