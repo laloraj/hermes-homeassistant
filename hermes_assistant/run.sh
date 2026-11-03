@@ -5,7 +5,9 @@
 # this script is the s6 CMD, and the container halts when it returns — which
 # means when the exec'd nginx below returns, NOT when webui dies):
 #   nginx :8787      (exec'd; Ingress target, multiplexes:)
-#     ├── /          → webui at 127.0.0.1:8788
+#     ├── /          → Webapp front door at 127.0.0.1:9130 (signs in, redirects to the Webapp)
+#     ├── /webapp/   → Hermes Webapp at 127.0.0.1:9120 (served by the gateway)
+#     ├── /old/      → classic webui at 127.0.0.1:8788
 #     └── /terminal/ → ttyd  at 127.0.0.1:7681 (--base-path /terminal/)
 #   webui supervisor (bg subshell; respawns server.py on 127.0.0.1:8788)
 #   ttyd             (bg, bound 127.0.0.1:7681)
@@ -322,6 +324,10 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
         rm -rf /data/hermes/node 2>/dev/null || true
         ln -sfn /opt/hermes-agent/node /data/hermes/node
     fi
+    # The browser Webapp is served by the gateway itself; turn it on (idempotent, only when this Hermes has it).
+    if hermes webapp --help >/dev/null 2>&1; then
+        hermes config set webapp.enabled true >/dev/null 2>&1 || true
+    fi
     trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
     while true; do
         # hermes-safe-update.sh holds the gateway down while it swaps code or databases.
@@ -334,6 +340,33 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
     done
 ) &
 bashio::log.info "gateway respawn supervisor PID=$!"
+
+# ─── Webapp bundle + front door ─────────────────────────────────────────────
+# `hermes webapp --build-only` builds the browser bundle when it is missing or out of date (a few minutes the
+# first time, near-instant afterwards). The flag file lets the front door show a "building" page meanwhile.
+(
+    set +e
+    while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
+    export HERMES_HOME=/data/hermes
+    export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
+    if hermes webapp --help >/dev/null 2>&1; then
+        touch /data/hermes/.webapp-building
+        hermes webapp --build-only >> /data/hermes/logs/webapp-build.log 2>&1 \
+            || bashio::log.warning "Webapp build failed; the classic WebUI at /old/ still works"
+        rm -f /data/hermes/.webapp-building
+    fi
+) &
+
+# Front door: HA Ingress is the gate, so it mints the one-use Webapp sign-in link and redirects (respawned).
+(
+    set +e
+    export HERMES_HOME=/data/hermes
+    while true; do
+        python3 /usr/local/bin/webapp-ticket.py >> /data/hermes/logs/webapp-ticket.log 2>&1
+        sleep 3
+    done
+) &
+bashio::log.info "Webapp front door started (127.0.0.1:9130)"
 # A pending update is verified once the gateway is up; a failed health check rolls back.
 ( sleep 20; "${SAFE_UPDATE}" --verify >/dev/null 2>&1 ) &   # the script logs to safe-update.log itself
 
@@ -382,5 +415,5 @@ if bashio::var.true "${ENABLE_TERMINAL}"; then
 fi
 
 # ─── nginx (foreground, PID 1) ──────────────────────────────────────────────
-bashio::log.info "Starting nginx :${INGRESS_PORT} multiplex (/, /terminal/)"
+bashio::log.info "Starting nginx :${INGRESS_PORT} multiplex (/ -> Webapp, /old/, /terminal/)"
 exec /usr/sbin/nginx -c /etc/nginx/nginx.conf
