@@ -325,8 +325,11 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
         ln -sfn /opt/hermes-agent/node /data/hermes/node
     fi
     # The browser Webapp is served by the gateway itself; turn it on (idempotent, only when this Hermes has it).
-    if hermes webapp --help >/dev/null 2>&1; then
-        hermes config set webapp.enabled true >/dev/null 2>&1 || true
+    HERMES_LAUNCHER=/usr/local/bin/hermes   # the updater-maintained launcher, not venv/bin/hermes
+    if "${HERMES_LAUNCHER}" webapp --help >/dev/null 2>&1; then
+        "${HERMES_LAUNCHER}" config set webapp.enabled true >> /data/hermes/logs/webapp-build.log 2>&1 || true
+    else
+        echo "$(date '+%F %T') Webapp not available in this Hermes version; front page falls back to /old/" >> /data/hermes/logs/webapp-build.log
     fi
     trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
     while true; do
@@ -349,9 +352,10 @@ bashio::log.info "gateway respawn supervisor PID=$!"
     while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
     export HERMES_HOME=/data/hermes
     export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
-    if hermes webapp --help >/dev/null 2>&1; then
+    HERMES_LAUNCHER=/usr/local/bin/hermes
+    if "${HERMES_LAUNCHER}" webapp --help >/dev/null 2>&1; then
         touch /data/hermes/.webapp-building
-        hermes webapp --build-only >> /data/hermes/logs/webapp-build.log 2>&1 \
+        "${HERMES_LAUNCHER}" webapp --build-only >> /data/hermes/logs/webapp-build.log 2>&1 \
             || bashio::log.warning "Webapp build failed; the classic WebUI at /old/ still works"
         rm -f /data/hermes/.webapp-building
     fi

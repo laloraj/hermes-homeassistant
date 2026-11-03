@@ -1,5 +1,12 @@
 # Changelog
 
+## fork (laloraj) 1.8.1 — 2026-11-03
+
+- **Fix: the Webapp front page did not come up after the 1.8.0 update.** The boot steps that enable and build the
+  Webapp called `hermes` from the agent virtualenv, whose launcher predates the updater and does not know the
+  `webapp` command, so the Webapp stayed off and `/` fell back to the classic WebUI. They now use the launcher
+  the updater maintains (`/usr/local/bin/hermes`). Steps are logged to `/data/hermes/logs/webapp-build.log`.
+
 ## fork (laloraj) 1.8.0 — 2026-11-03
 
 **The Hermes Webapp is now the add-on's front page.** Opening the add-on panel signs you in and lands in the
