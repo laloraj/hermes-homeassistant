@@ -14,6 +14,7 @@ HERMES_HOME="${HERMES_HOME:-/data/hermes}"
 AGENT_DIR="${AGENT_DIR:-$HERMES_HOME/agent-code}"
 SNAP_ROOT="$HERMES_HOME/backups/pre-update"
 MARKER="$HERMES_HOME/.update-pending"
+PAUSE="$HERMES_HOME/.update-running"
 LOG="$HERMES_HOME/logs/safe-update.log"
 KEEP=3
 API_PORT="${API_PORT:-8642}"
@@ -47,6 +48,18 @@ print("\n".join(seen))
 EOF
 }
 
+backup_db() {
+  # A consistent copy of a live SQLite database (a plain cp can catch it mid-write).
+  python3 - "$1" "$2" <<'PYEOF'
+import sqlite3, sys
+src = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True, timeout=30)
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close()
+src.close()
+PYEOF
+}
+
 snapshot() {
   local ts dir; ts=$(date +%Y%m%d-%H%M%S); dir="$SNAP_ROOT/$ts"; mkdir -p "$dir"
   # Commit and push any wiki edits first so git also holds the latest copy.
@@ -57,7 +70,10 @@ snapshot() {
   fi
   while IFS= read -r p; do
     mkdir -p "$dir/$(dirname "$p")"
-    cp -a "$HERMES_HOME/$p" "$dir/$p" 2>/dev/null || log "WARN: could not copy $p"
+    case "$p" in
+      state.db|response_store.db|kanban.db) backup_db "$HERMES_HOME/$p" "$dir/$p" || log "WARN: could not back up $p" ;;
+      *) cp -a "$HERMES_HOME/$p" "$dir/$p" 2>/dev/null || log "WARN: could not copy $p" ;;
+    esac
   done < <(include_list)
   git -C "$AGENT_DIR" rev-parse HEAD > "$dir/.code-rev" 2>/dev/null
   version > "$dir/.version"
@@ -114,13 +130,27 @@ do_update() {
   return 0
 }
 
-restart_gateway() {
-  # The respawn loop in run.sh restarts the gateway within ~10s of it exiting.
+gateway_pids() {
+  # PIDs of the gateway that belongs to THIS $HERMES_HOME (a test copy must never touch the live one).
+  local p c
   for p in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-    case "$c" in *"hermes gateway run"*) kill "${p#/proc/}" 2>/dev/null;; esac
+    case "$c" in *"hermes gateway run"*)
+      tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx "HERMES_HOME=$HERMES_HOME" && echo "${p#/proc/}";;
+    esac
   done
 }
+
+stop_gateway() {
+  # Stop it and WAIT until it has exited, so nothing writes to the databases or imports code while files
+  # are swapped. The respawn loop in run.sh waits while $PAUSE exists.
+  touch "$PAUSE"
+  local i pids
+  for i in $(seq 1 30); do pids=$(gateway_pids); [ -z "$pids" ] && return 0; kill $pids 2>/dev/null; sleep 1; done
+  pids=$(gateway_pids); [ -n "$pids" ] && { kill -9 $pids 2>/dev/null; sleep 2; }
+}
+
+start_gateway() { rm -f "$PAUSE"; }   # the respawn loop starts it again within ~10s
 
 health_check() {
   # A real check: gateway port up, then a real model call through the API server.
@@ -139,14 +169,25 @@ do_rollback() {
   local dir="${1:-$(ls -1d "$SNAP_ROOT"/*/ 2>/dev/null | sort | tail -1)}"; dir="${dir%/}"
   [ -d "$dir" ] || { log "ERROR: no snapshot to restore"; return 1; }
   log "rolling back to $dir ($(cat "$dir/.version" 2>/dev/null))"
+  stop_gateway
   local rev; rev=$(cat "$dir/.code-rev" 2>/dev/null)
   [ -n "$rev" ] && git -C "$AGENT_DIR" checkout -qf "$rev" 2>>"$LOG"
-  # Restore only the files an update can change: config, auth, databases and the Copilot plugin state.
-  for p in config.yaml .env auth.json state.db response_store.db kanban.db cron; do
-    [ -e "$dir/$p" ] && cp -a "$dir/$p" "$HERMES_HOME/" 2>>"$LOG"
+  # Restore only the files an update can change. Replace atomically (copy beside, then rename) and drop
+  # stale -wal/-shm/-journal files so a restored database is never mixed with the failed one's pages.
+  local p
+  for p in config.yaml .env auth.json state.db response_store.db kanban.db; do
+    [ -e "$dir/$p" ] || continue
+    rm -f "$HERMES_HOME/$p-wal" "$HERMES_HOME/$p-shm" "$HERMES_HOME/$p-journal"
+    cp -a "$dir/$p" "$HERMES_HOME/$p.restore.tmp" && mv -f "$HERMES_HOME/$p.restore.tmp" "$HERMES_HOME/$p"
   done
+  [ -d "$dir/cron" ] && cp -a "$dir/cron/." "$HERMES_HOME/cron/" 2>>"$LOG"
   rm -rf "$HERMES_HOME/plugins/github-copilot"
-  rm -f "$MARKER"; restart_gateway
+  python3 - "$HERMES_HOME/state.db" <<'PYEOF' || log "WARN: restored state.db failed its integrity check"
+import sqlite3, sys
+r = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True).execute("pragma integrity_check").fetchone()[0]
+sys.exit(0 if r == "ok" else 1)
+PYEOF
+  rm -f "$MARKER"; start_gateway
   log "rollback done; code at ${rev:0:10}"
 }
 
@@ -165,8 +206,9 @@ case "${1:-}" in
   --now)
     before=$(version); snap=$(snapshot) || { notify "Hermes update skipped: snapshot failed"; exit 1; }
     log "snapshot $snap; updating from $before"
+    stop_gateway
     if do_update; then
-      printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; restart_gateway; sleep 15; "$0" --verify
+      printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; start_gateway; sleep 15; "$0" --verify
     else notify "Hermes update failed; rolling back to $before"; do_rollback "$snap"; fi ;;
   *) sed -n 2,9p "$0"; exit 2 ;;
 esac

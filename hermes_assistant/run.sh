@@ -328,6 +328,8 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
     fi
     trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
     while true; do
+        # hermes-safe-update.sh holds the gateway down while it swaps code or databases.
+        while [ -f /data/hermes/.update-running ]; do sleep 2; done
         cd /data/hermes
         hermes gateway run --no-supervise >> /data/hermes/logs/gateway-addon.log 2>&1 &
         gw=$!
