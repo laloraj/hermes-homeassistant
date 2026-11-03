@@ -191,13 +191,42 @@ PYEOF
   log "rollback done; code at ${rev:0:10}"
 }
 
+reset_toggle() {
+  # One-shot: switch auto_update_agent back off through the Supervisor so the next restart does not retry.
+  # Sends the full option set back (the API replaces options), changing only that one key.
+  [ -n "${SUPERVISOR_TOKEN:-}" ] || { log "toggle: no SUPERVISOR_TOKEN, leaving auto_update_agent as is"; return 0; }
+  python3 - <<'PYEOF'
+import json, os, sys, urllib.request
+base = os.environ.get("SUPERVISOR_URL", "http://supervisor")
+hdr = {"Authorization": "Bearer " + os.environ["SUPERVISOR_TOKEN"], "Content-Type": "application/json"}
+def call(path, body=None):
+    req = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=hdr,
+                                 method="GET" if body is None else "POST")
+    return json.load(urllib.request.urlopen(req, timeout=20))
+opts = call("/addons/self/info")["data"]["options"]
+if opts.get("auto_update_agent") is False:
+    print("toggle already off"); sys.exit(0)
+opts["auto_update_agent"] = False
+r = call("/addons/self/options", {"options": opts})
+print("toggle reset:", r.get("result"))
+PYEOF
+  [ $? -eq 0 ] || log "WARN: could not reset the auto_update_agent toggle"
+}
+
 case "${1:-}" in
   --snapshot-only) snapshot ;;
   --rollback)      do_rollback "${2:-}" ;;
+  --reset-toggle)  reset_toggle ;;
   --boot)
     before=$(version); snap=$(snapshot) || { notify "Hermes update skipped: snapshot failed"; exit 1; }
+    # Normally no gateway exists yet at boot; stop any that does so code never changes under a running one.
+    stop_gateway
     do_update || { notify "Hermes update failed before restart; rolling back"; do_rollback "$snap"; exit 1; }
-    printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; log "updated: $before -> $(version); verify pending" ;;
+    after=$(version)
+    if [ "$after" = "$before" ] && [ "$(git -C "$AGENT_DIR" rev-parse HEAD 2>/dev/null)" = "$(cat "$snap/.code-rev" 2>/dev/null)" ]; then
+      start_gateway; notify "Hermes is already up to date ($after); nothing changed"; exit 0
+    fi
+    printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; start_gateway; log "updated: $before -> $after; verify pending" ;;
   --verify)
     [ -f "$MARKER" ] || exit 0
     snap=$(sed -n 1p "$MARKER"); before=$(sed -n 2p "$MARKER")
