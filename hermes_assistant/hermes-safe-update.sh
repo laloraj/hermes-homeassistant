@@ -118,6 +118,19 @@ ensure_copilot_plugin() {
   hermes_cmd plugins enable github-copilot >>"$LOG" 2>&1 || true
 }
 
+fix_launcher() {
+  # `venv/bin/hermes` is a pip entry point that imports hermes_cli from the image's baked-in tree
+  # (/opt/hermes-agent-code), NOT from the updated checkout in $AGENT_DIR. With the venv first on PATH, every bare
+  # `hermes` (the gateway loop, the terminal tab, scripts, the agent's own shell) silently ran the OLD code after an
+  # update. Make it hand off to the updater-maintained launcher. Idempotent; safe to run on every boot and update.
+  local shim=/usr/local/bin/hermes v="$AGENT_DIR/venv/bin/hermes"
+  [ -x "$shim" ] && [ -f "$v" ] || return 0
+  grep -q 'venv/bin/hermes' "$shim" 2>/dev/null && return 0     # the shim itself points here: would loop
+  grep -q '/usr/local/bin/hermes' "$v" 2>/dev/null && return 0   # already repaired
+  printf '#!/bin/sh\nexec /usr/local/bin/hermes "$@"\n' > "$v.new" && chmod +x "$v.new" && mv -f "$v.new" "$v" \
+    && log "launcher: venv/bin/hermes now hands off to /usr/local/bin/hermes"
+}
+
 do_update() {
   ensure_git_main
   local out; out=$(hermes_cmd update 2>&1); echo "$out" >> "$LOG"
@@ -127,6 +140,7 @@ do_update() {
     hermes_cmd pm install >>"$LOG" 2>&1 || { log "ERROR: pm install failed"; return 1; }
   fi
   ensure_copilot_plugin
+  fix_launcher
   return 0
 }
 
@@ -217,6 +231,7 @@ case "${1:-}" in
   --snapshot-only) snapshot ;;
   --rollback)      do_rollback "${2:-}" ;;
   --reset-toggle)  reset_toggle ;;
+  --fix-launcher)  fix_launcher ;;
   --boot)
     before=$(version); snap=$(snapshot) || { notify "Hermes update skipped: snapshot failed"; exit 1; }
     # Normally no gateway exists yet at boot; stop any that does so code never changes under a running one.

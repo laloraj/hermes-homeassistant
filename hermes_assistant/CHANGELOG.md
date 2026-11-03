@@ -1,5 +1,16 @@
 # Changelog
 
+## fork (laloraj) 1.8.2 — 2026-11-03
+
+- **Fix: the add-on kept running the OLD Hermes code after an update, and the Webapp never started.** The gateway
+  was started as a bare `hermes` with the agent virtualenv first on PATH. That entry point imports Hermes from the
+  image's baked-in copy, not from the updated checkout, so after `auto_update_agent` the version reported by the
+  CLI was new but the running gateway (and any `hermes` typed in the Terminal tab or run by the agent) was still
+  the old release. The gateway and every bare `hermes` now use the updater-maintained launcher
+  (`/usr/local/bin/hermes`), the terminal PATH puts it first, and `venv/bin/hermes` is repaired at every boot and
+  after every update to hand off to it.
+- Consequence for updates: the post-update health check now exercises the new code.
+
 ## fork (laloraj) 1.8.1 — 2026-11-03
 
 - **Fix: the Webapp front page did not come up after the 1.8.0 update.** The boot steps that enable and build the

@@ -203,6 +203,9 @@ if bashio::var.true "${AUTO_UPDATE_AGENT}" && [ -d "${AGENT_DST}/.git" ]; then
     "${SAFE_UPDATE}" --reset-toggle 2>&1 | sed 's/^/  [safe-update] /' || true
 fi
 
+# Every bare `hermes` must run the updated code, not the image's baked-in tree (see hermes-safe-update.sh).
+AGENT_DIR="${AGENT_DIR}" HERMES_HOME=/data/hermes "${SAFE_UPDATE}" --fix-launcher 2>&1 | sed 's/^/  [safe-update] /' || true
+
 if bashio::var.true "${AUTO_UPDATE_WEBUI}" && [ -d "${WEBUI_DST}/.git" ]; then
     bashio::log.info "auto_update_webui=true — git pull hermes-webui (auto-resetting any local mods)"
     (
@@ -316,7 +319,7 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
     set +e
     while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
     export HERMES_HOME=/data/hermes
-    export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
+    export PATH="/usr/local/bin:${AGENT_DIR}/venv/bin:${PATH}"
     # Hermes looks for its managed Node at $HERMES_HOME/node/bin before PATH.
     # Point it at the image's Node so the WhatsApp bridge works without a
     # second Node install (idempotent; refreshed every boot).
@@ -336,7 +339,7 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
         # hermes-safe-update.sh holds the gateway down while it swaps code or databases.
         while [ -f /data/hermes/.update-running ]; do sleep 2; done
         cd /data/hermes
-        hermes gateway run --no-supervise >> /data/hermes/logs/gateway-addon.log 2>&1 &
+        "${HERMES_LAUNCHER}" gateway run --no-supervise >> /data/hermes/logs/gateway-addon.log 2>&1 &
         gw=$!
         wait "${gw}"
         sleep 10
@@ -351,7 +354,7 @@ bashio::log.info "gateway respawn supervisor PID=$!"
     set +e
     while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
     export HERMES_HOME=/data/hermes
-    export PATH="${AGENT_DIR}/venv/bin:/usr/local/bin:${PATH}"
+    export PATH="/usr/local/bin:${AGENT_DIR}/venv/bin:${PATH}"
     HERMES_LAUNCHER=/usr/local/bin/hermes
     if "${HERMES_LAUNCHER}" webapp --help >/dev/null 2>&1; then
         touch /data/hermes/.webapp-building
@@ -393,7 +396,7 @@ if bashio::var.true "${ENABLE_TERMINAL}"; then
             done
             export HERMES_HOME=/data/hermes
             export HERMES_INSTALL_DIR=${AGENT_DIR}
-            export PATH=\"${AGENT_DIR}/venv/bin:${WEBUI_DIR}/.venv/bin:/opt/hermes-agent/node/bin:/usr/local/bin:\${PATH}\"
+            export PATH=\"/usr/local/bin:${AGENT_DIR}/venv/bin:${WEBUI_DIR}/.venv/bin:/opt/hermes-agent/node/bin:\${PATH}\"
             cd \${HERMES_HOME}
             echo ''
             echo '=================================================='
