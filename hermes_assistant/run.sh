@@ -186,12 +186,23 @@ rm -f "${BOOTSTRAP_LOCK}"
 bashio::log.info "Agent dir: ${AGENT_DIR}"
 bashio::log.info "WebUI dir: ${WEBUI_DIR}"
 
-# ─── Optional auto-updates ──────────────────────────────────────────────────
+# ─── Optional agent auto-update (safe: snapshot, update, verify, auto-rollback) ──
+# Personal data (memories, wiki, skills, scripts, config, databases) lives in
+# /data/hermes, outside the agent git checkout, so an update never touches it;
+# hermes-safe-update.sh also keeps a dated snapshot copy and restores it on failure.
+SAFE_UPDATE=/usr/local/bin/hermes-safe-update.sh
+export AGENT_DIR HERMES_HOME=/data/hermes
 if bashio::var.true "${AUTO_UPDATE_AGENT}" && [ -d "${AGENT_DST}/.git" ]; then
-    bashio::log.info "auto_update_agent=true — running hermes update"
-    HERMES_HOME=/data/hermes /usr/local/bin/hermes update 2>&1 \
-        | sed 's/^/  [hermes update] /' || \
-        bashio::log.warning "hermes update failed — continuing"
+    bashio::log.info "auto_update_agent=true — running safe update (one-shot)"
+    "${SAFE_UPDATE}" --boot 2>&1 | sed 's/^/  [safe-update] /' || \
+        bashio::log.warning "safe update did not finish — continuing on the current version"
+    # One-shot: switch the option off again so the next restart does not retry.
+    if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+        curl -s -X POST -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" -H "Content-Type: application/json" \
+            http://supervisor/addons/self/options \
+            -d "$(jq -c '.options.auto_update_agent=false | {options: (.options)}' <<<"$(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" http://supervisor/addons/self/info | jq -c '.data')")" \
+            >/dev/null 2>&1 || true
+    fi
 fi
 
 if bashio::var.true "${AUTO_UPDATE_WEBUI}" && [ -d "${WEBUI_DST}/.git" ]; then
@@ -325,6 +336,8 @@ bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
     done
 ) &
 bashio::log.info "gateway respawn supervisor PID=$!"
+# A pending update is verified once the gateway is up; a failed health check rolls back.
+( sleep 20; "${SAFE_UPDATE}" --verify >> /data/hermes/logs/safe-update.log 2>&1 ) &
 
 # ─── Start ttyd (background, loopback only — nginx fronts it) ───────────────
 if bashio::var.true "${ENABLE_TERMINAL}"; then

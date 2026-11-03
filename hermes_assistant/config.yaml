@@ -1,5 +1,5 @@
 name: "Hermes Assistant (fork: +HA config/addons access)"
-version: "1.6.13"
+version: "1.7.0"
 slug: hermes_assistant
 description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with Web UI and setup terminal. This fork additionally maps the real HA /config and /addons folders into the container."
 url: https://github.com/laloraj/hermes-homeassistant
@@ -78,9 +78,9 @@ options:
   enable_terminal: true
 
   # ── UPGRADES ────────────────────────────────────────────────────────────
-  # When true, run `hermes update` on every container start. Picks up
-  # upstream Hermes agent releases without bumping the add-on version.
-  # Adds ~30s to boot when an update is available.
+  # When true, update Hermes ONCE on the next start (snapshot, update, health
+  # check, automatic rollback), then this switches itself back off. Your
+  # memory, wiki, scripts and settings are kept. Or ask the agent to update.
   auto_update_agent: false
 
   # When true, `git pull` hermes-webui on every container start.
