@@ -1,5 +1,36 @@
 # Changelog
 
+## fork (laloraj) 1.8.0 — 2026-11-03
+
+**The Hermes Webapp is now the add-on's front page.** Opening the add-on panel signs you in and lands in the
+Webapp (the browser version of Hermes Desktop, served by the gateway). No button, no sign-in page.
+
+- **Front page:** `/` signs you in to the Webapp automatically. HA Ingress is the gate; the add-on publishes no ports.
+- **Classic WebUI kept as a fallback** at `<panel URL>/old/`. Old bookmarks to other paths still reach it.
+- **Setup terminal unchanged** at `/terminal/`.
+- **Self-healing:** if the Webapp is not ready, `/` redirects to `/old/`; while its bundle builds you get a short
+  retry page with a link to the classic WebUI.
+- **Boot:** turns on `webapp.enabled` (only if this Hermes has the Webapp; never overwrites your host/port) and
+  builds the browser bundle in the background (about 1.5 min the first time, instant afterwards).
+- **Needs Hermes v0.22.6 or newer.** On older Hermes the front page falls back to `/old/` automatically.
+- **nginx workers now run as root.** The Webapp only accepts a sign-in from a connection owned by the Hermes user.
+- Chat history from the classic WebUI is not shown in the Webapp (memory, wiki, skills, cron are unaffected).
+
+## fork (laloraj) 1.7.0 — 2026-11-03
+
+**Safe in-place Hermes updates.** Your memory, wiki, skills, scripts, settings and databases are kept.
+
+- **`auto_update_agent` is now one-shot:** turn it on, restart the add-on, Hermes updates once and the option
+  switches itself back off. It used to retry on every restart and fail.
+- **Each update:** snapshot first (databases copied with SQLite's backup API), update, restart, then a real model
+  call as the health check. If anything fails, it rolls back the code, config and databases automatically.
+- **Telegram message** with the result: updated, already up to date, or rolled back.
+- **Also runnable by hand** in the Terminal tab: `hermes-safe-update.sh --now` (update) or `--rollback`.
+- **Fixes the two things that broke the old toggle:** no `main` branch on the pinned checkout, and the add-on's old
+  Python failing the new package installer. The Copilot provider plugin is installed if your config uses it.
+- Keeps the 3 newest snapshots in `/data/hermes/backups/pre-update/`.
+- Leave `auto_update_webui` off; it was not changed or tested.
+
 ## fork (laloraj) 1.6.12 — 2026-10-18
 
 - Start and respawn the messaging gateway (API server on 8642) from run.sh.
