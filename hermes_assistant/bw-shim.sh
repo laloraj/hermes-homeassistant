@@ -2,6 +2,7 @@
 # The Bitwarden CLI refuses plain http:// servers (hard-coded). The Vaultwarden add-on only speaks http on the private
 # add-on network, so this runs a tiny loopback-only TLS front (separate nginx, self-signed cert) that forwards to it.
 # Usage: bw-shim.sh start <http-upstream-url> | ensure     (the CLI is told to trust the cert via NODE_EXTRA_CA_CERTS)
+export PATH=$PATH:/usr/sbin:/sbin   # the add-on boot PATH has no /usr/sbin (nginx lives there)
 D=/data/hermes/tools/bw/shim; PORT=18443
 mkdir -p "$D" && chmod 700 "$D"
 listening() { (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; }

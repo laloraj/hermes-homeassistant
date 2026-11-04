@@ -1,5 +1,11 @@
 # Changelog
 
+## fork (laloraj) 1.9.1 — 2026-11-04
+
+- **Fix: Bitwarden did not start at boot in 1.9.0.** The add-on's start-up PATH has no `/usr/sbin`, so the small
+  local TLS front could not find `nginx` and the Bitwarden step reported "could not start the local TLS shim".
+  Fixed; verified with the add-on's exact boot PATH (login, unlock and listing the vault items all work).
+
 ## fork (laloraj) 1.9.0 — 2026-11-04
 
 - **New: Bitwarden password manager, set up by the add-on itself.** The add-on now ships the Bitwarden CLI (`bw`).
