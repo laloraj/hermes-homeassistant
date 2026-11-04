@@ -103,6 +103,7 @@ RUN apt-get update \
         python3-yaml \
         xz-utils \
         openssl \
+        libatomic1 \
         openssh-client \
         ffmpeg \
         ripgrep \

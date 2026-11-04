@@ -75,7 +75,7 @@ jobs:
   build:
     name: Build ${{ matrix.arch }}
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,17 +83,13 @@ jobs:
           - arch: amd64
             base: ghcr.io/home-assistant/amd64-base-debian:bookworm
             platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: aarch64
             base: ghcr.io/home-assistant/aarch64-base-debian:bookworm
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -188,9 +184,11 @@ jobs:
           - arch: amd64
             base: ghcr.io/home-assistant/amd64-base-debian:bookworm
             platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: aarch64
             base: ghcr.io/home-assistant/aarch64-base-debian:bookworm
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -200,12 +198,6 @@ jobs:
           ver=$(yq eval '.version' hermes_assistant/config.yaml)
           echo "version=${ver}" >> $GITHUB_OUTPUT
           echo "Publishing version: ${ver}"
-
-      - name: Set up QEMU
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

@@ -31,11 +31,21 @@ env:
   UPSTREAM_TAG: "1.6.8"
 
 jobs:
-  retag:
-    runs-on: ubuntu-latest
+  certify:
+    name: Certify ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Reliability regressions
         run: |
@@ -47,35 +57,55 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and verify Webapp-only patched images
+      - name: Build and verify native Webapp-only image
+        env:
+          arch: ${{ matrix.arch }}
+          plat: ${{ matrix.platform }}
         run: |
           VERSION=$(yq eval '.version' hermes_assistant/config.yaml)
-          for pair in amd64:linux/amd64 aarch64:linux/arm64; do
-            arch=${pair%%:*}; plat=${pair##*:}
-            printf 'FROM ghcr.io/nuttaruj/%s-hermes-assistant:%s\nCOPY nginx.conf /etc/nginx/nginx.conf\nCOPY run.sh /run.sh\nCOPY hermes-safe-update.sh /usr/local/bin/hermes-safe-update.sh\nCOPY webapp-ticket.py /usr/local/bin/webapp-ticket.py\nCOPY addon_health.py /usr/local/bin/addon_health.py\nCOPY addon_config.py /usr/local/bin/addon_config.py\nCOPY addon_runtime.py /usr/local/bin/addon_runtime.py\nCOPY hermes-launcher.sh /usr/local/bin/hermes\nCOPY bw-setup.sh /usr/local/bin/bw-setup.sh\nCOPY bw-shim.sh /usr/local/bin/bw-shim.sh\nCOPY bw-wrapper.sh /usr/local/bin/bw\nCOPY bw-session.sh /usr/local/bin/bw-session\nRUN apt-get update && apt-get install -y --no-install-recommends python3-yaml openssl xz-utils && rm -rf /var/lib/apt/lists/*\nRUN rm -rf /opt/hermes-webui /opt/hermes-agent-code && git clone --depth=1 --branch v0.22.6 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent-code && env UV_PYTHON_INSTALL_DIR=/opt/hermes-python uv venv /opt/hermes-agent-code/venv --python 3.14 && env UV_PROJECT_ENVIRONMENT=/opt/hermes-agent-code/venv uv sync --project /opt/hermes-agent-code --frozen --no-dev --extra all --extra messaging\nRUN env PATH=/opt/hermes-agent/node/bin:/usr/local/bin:/usr/bin:/bin npm install --prefix /opt/bw @bitwarden/cli && chmod +x /usr/local/bin/hermes /usr/local/bin/bw-shim.sh /usr/local/bin/bw-setup.sh /usr/local/bin/bw /usr/local/bin/bw-session /usr/local/bin/hermes-safe-update.sh /usr/local/bin/webapp-ticket.py /usr/local/bin/addon_health.py /usr/local/bin/addon_config.py /run.sh\nHEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8787/health"]\n' "$arch" "$UPSTREAM_TAG" > Dockerfile.patch
-            docker buildx build --platform "$plat" -f Dockerfile.patch hermes_assistant \
-              -t ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} \
-              -t ghcr.io/laloraj/${arch}-hermes-assistant:latest --load
-            docker run --rm --platform "$plat" --entrypoint /bin/bash \
-              ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} -ec '
-                test ! -e /opt/hermes-webui
-                python3 -c "import yaml"
-                python3 /usr/local/bin/addon_health.py --help
-                python3 /usr/local/bin/addon_config.py --help
-                /usr/local/bin/hermes --version
-                /usr/local/bin/hermes webapp --help
-                bash -n /run.sh
-                /usr/sbin/nginx -t
-              '
-            docker run --rm --platform "$plat" --entrypoint /usr/bin/python3 \
-              -e HERMES_IMAGE_SMOKE=1 -v "$PWD/tests:/tests:ro" \
-              ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} /tests/image_boot.py
-          done
-          # Neither architecture is published until BOTH fresh-boot smokes pass.
-          # Manual branch runs certify images without publishing release tags.
+          printf 'FROM ghcr.io/nuttaruj/%s-hermes-assistant:%s\nCOPY nginx.conf /etc/nginx/nginx.conf\nCOPY run.sh /run.sh\nCOPY hermes-safe-update.sh /usr/local/bin/hermes-safe-update.sh\nCOPY webapp-ticket.py /usr/local/bin/webapp-ticket.py\nCOPY addon_health.py /usr/local/bin/addon_health.py\nCOPY addon_config.py /usr/local/bin/addon_config.py\nCOPY addon_runtime.py /usr/local/bin/addon_runtime.py\nCOPY hermes-launcher.sh /usr/local/bin/hermes\nCOPY bw-setup.sh /usr/local/bin/bw-setup.sh\nCOPY bw-shim.sh /usr/local/bin/bw-shim.sh\nCOPY bw-wrapper.sh /usr/local/bin/bw\nCOPY bw-session.sh /usr/local/bin/bw-session\nRUN apt-get update && apt-get install -y --no-install-recommends python3-yaml openssl xz-utils libatomic1 && rm -rf /var/lib/apt/lists/*\nRUN rm -rf /opt/hermes-webui /opt/hermes-agent-code && git clone --depth=1 --branch v0.22.6 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent-code && env UV_PYTHON_INSTALL_DIR=/opt/hermes-python uv venv /opt/hermes-agent-code/venv --python 3.14 && env UV_PROJECT_ENVIRONMENT=/opt/hermes-agent-code/venv uv sync --project /opt/hermes-agent-code --frozen --no-dev --extra all --extra messaging\nRUN env PATH=/opt/hermes-agent/node/bin:/usr/local/bin:/usr/bin:/bin npm install --prefix /opt/bw @bitwarden/cli && chmod +x /usr/local/bin/hermes /usr/local/bin/bw-shim.sh /usr/local/bin/bw-setup.sh /usr/local/bin/bw /usr/local/bin/bw-session /usr/local/bin/hermes-safe-update.sh /usr/local/bin/webapp-ticket.py /usr/local/bin/addon_health.py /usr/local/bin/addon_config.py /run.sh\nHEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8787/health"]\n' "$arch" "$UPSTREAM_TAG" > Dockerfile.patch
+          docker buildx build --platform "$plat" -f Dockerfile.patch hermes_assistant \
+            -t ghcr.io/laloraj/${arch}-hermes-assistant:ci-${{ github.sha }} \
+            --load
+          docker run --rm --platform "$plat" --entrypoint /bin/bash \
+            ghcr.io/laloraj/${arch}-hermes-assistant:ci-${{ github.sha }} -ec '
+              test ! -e /opt/hermes-webui
+              python3 -c "import yaml"
+              python3 /usr/local/bin/addon_health.py --help
+              python3 /usr/local/bin/addon_config.py --help
+              /usr/local/bin/hermes --version
+              /usr/local/bin/hermes webapp --help
+              bash -n /run.sh
+              /usr/sbin/nginx -t
+            '
+          docker run --rm --platform "$plat" --entrypoint /usr/bin/python3 \
+            -e HERMES_IMAGE_SMOKE=1 -v "$PWD/tests:/tests:ro" \
+            ghcr.io/laloraj/${arch}-hermes-assistant:ci-${{ github.sha }} /tests/image_boot.py
+          # Intermediate images are immutable candidates, never release/latest.
           if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            for arch in amd64 aarch64; do
-              docker push ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION}
-              docker push ghcr.io/laloraj/${arch}-hermes-assistant:latest
-            done
+            docker push ghcr.io/laloraj/${arch}-hermes-assistant:ci-${{ github.sha }}
           fi
+
+  publish:
+    name: Publish certified release images
+    needs: certify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish both architectures only after both native boot smokes pass
+        run: |
+          VERSION=$(yq eval '.version' hermes_assistant/config.yaml)
+          for arch in amd64 aarch64; do
+            image=ghcr.io/laloraj/${arch}-hermes-assistant
+            docker buildx imagetools create \
+              --tag ${image}:${VERSION} --tag ${image}:latest \
+              ${image}:ci-${{ github.sha }}
+            docker buildx imagetools inspect ${image}:${VERSION}
+          done
