@@ -52,6 +52,8 @@ def atomic_json(path, data):
 def export_runtime_recipe(home, source, target):
     """Same schema as the backups engine: portable extras/declines/versions/hashes."""
     home, source, target = map(Path, (home, source, target))
+    if not (source / 'pm/lock.json').is_file():
+        return False  # Pre-PM source cannot have matching modern reconstruction intent.
     state = selection(home, source)
     if not (state / 'facts.json').exists():
         existing = home / 'pm-reconstruction.json'
@@ -73,6 +75,8 @@ def export_runtime_recipe(home, source, target):
 
 def ensure_runtime(home, source, bootstrap):
     home, source = Path(home), Path(source)
+    if not (source / 'pm/lock.json').is_file():
+        raise ValueError('pre-PM source requires snapshot-backed upgrade: hermes-safe-update.sh --now (or auto_update_agent)')
     recipe_path = home / 'pm-reconstruction.json'
     if not recipe_path.exists():
         export_runtime_recipe(home, source, recipe_path)

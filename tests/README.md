@@ -20,6 +20,17 @@ command/build/health/update soft failures; scoped gateway termination; SQLite WA
 snapshot/integrity/refusal; config/auth/plugin/old-chat/wiki-git restoration; dynamic
 required/optional backup paths; portable PM intent, declines and reconstruction.
 
+Pre-PM migration regressions use archived source from the actual original image
+seed (`v2026.8.13`) and a local-only git origin. They execute manual and one-shot
+boot upgrades, snapshot/PM/build failure rollback and retries, including the
+old boot's stale recipe and preserved tracked edits. Fixture provenance and the
+supported-bootstrap stand-in boundary are documented in `fixtures/README.md`.
+Legacy recovery needs a successful snapshot plus network access to upstream
+main and PM packages: use `auto_update_agent` or `hermes-safe-update.sh --now`.
+Do not delete `/data`, reset the checkout, or run the old core's pip updater.
+After failed migration/legacy rollback, code and personal data are restored but
+the gateway stays held behind recovery until an explicit upgrade succeeds.
+
 ## Disposable image gate
 
 Both workflows invoke `image_boot.py` inside freshly built disposable containers

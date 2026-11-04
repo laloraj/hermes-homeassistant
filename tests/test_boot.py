@@ -24,6 +24,8 @@ class BootRig(unittest.TestCase):
             binaries.mkdir()
             executable(seed / 'venv/bin/tool', '#!' + str(seed) + '/venv/bin/python\nfixture\n')
             (seed / 'hermes').write_text('fixture source')
+            (seed / 'pm').mkdir()
+            (seed / 'pm/lock.json').write_text('{"packages":{}}')
             executable(seed / 'venv/bin/python', '#!/bin/sh\nexit 0\n')
             for name in ['hermes-safe-update.sh', 'addon_config.py', 'addon_runtime.py', 'addon_health.py', 'webapp-ticket.py']:
                 shutil.copy2(ADDON / name, binaries / name)

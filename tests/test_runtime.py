@@ -169,6 +169,8 @@ class UpdateRig(unittest.TestCase):
                         ['git', '-C', str(self.code), 'config', 'user.name', 'Test']):
             subprocess.run(command, check=True, capture_output=True)
         (self.code / 'version').write_text('before')
+        (self.code / 'pm').mkdir()
+        (self.code / 'pm/lock.json').write_text('{"packages":{}}')
         subprocess.run(['git', '-C', str(self.code), 'add', '.'], check=True)
         subprocess.run(['git', '-C', str(self.code), 'commit', '-qm', 'fixture'], check=True)
         self.rev = subprocess.check_output(['git', '-C', str(self.code), 'rev-parse', 'HEAD'], text=True).strip()

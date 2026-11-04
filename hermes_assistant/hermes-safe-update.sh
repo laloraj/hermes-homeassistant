@@ -29,7 +29,12 @@ mkdir -p "$SNAP_ROOT" "$(dirname "$LOG")"
 log()    { echo "$(date '+%F %T') $*" | tee -a "$LOG" >&2; }
 notify() { [ -x "$HERMES_HOME/tools/bin/tg-notify" ] && "$HERMES_HOME/tools/bin/tg-notify" "$1" >/dev/null 2>&1; log "NOTIFY: $1"; }
 hermes_cmd() { "$HERMES_BIN" "$@" 9>&-; }
-version() { local out; out=$(hermes_cmd --version 2>/dev/null) || return 1; printf '%s\n' "${out%%$'\n'*}"; }
+legacy_source() { [ ! -f "$AGENT_DIR/pm/lock.json" ]; }
+version() {
+  # Old/broken venvs need not import successfully to snapshot and migrate them.
+  if legacy_source; then git -C "$AGENT_DIR" describe --tags --always; return; fi
+  local out; out=$(hermes_cmd --version 2>/dev/null) || return 1; printf '%s\n' "${out%%$'\n'*}"
+}
 
 # Everything personal that must survive. Single source of truth: the backups skill's include list.
 include_list() {
@@ -96,10 +101,14 @@ for name in (dest / '.include').read_text().splitlines():
         copy(src, dst)
 PYEOF
   /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" export --home "$HERMES_HOME" --source "$AGENT_DIR" --target "$dir/pm-reconstruction.json" || { rm -rf "$dir"; return 1; }
+  # An earlier failed boot may have written a modern default recipe for old source.
+  # It is not legacy reconstruction intent and must not trap rollback in PM.
+  if legacy_source; then rm -f "$dir/pm-reconstruction.json"; fi
   if [ -f "$dir/pm-reconstruction.json" ]; then
     grep -qx 'pm-reconstruction.json' "$dir/.include" || printf '%s\n' pm-reconstruction.json >> "$dir/.include"
   fi
   git -C "$AGENT_DIR" rev-parse HEAD > "$dir/.code-rev" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  git -C "$AGENT_DIR" diff --binary HEAD > "$dir/.code-diff" || { rm -rf "$dir"; return 1; }
   version > "$dir/.version" || { rm -rf "$dir"; return 1; }
   [ -f "$dir/config.yaml" ] || { log 'ERROR: snapshot missing config.yaml'; rm -rf "$dir"; return 1; }
   # Prune only complete snapshots, after a new valid snapshot exists.
@@ -141,6 +150,19 @@ fix_launcher() {
 
 do_update() {
   ensure_git_main
+  if legacy_source; then
+    # Never ask old core's pip updater to bootstrap PM under Python 3.11.
+    # Caller has completed the personal/code snapshot and stopped the gateway.
+    log 'migration: fetching latest main before supported-bootstrap PM reconstruction'
+    git -C "$AGENT_DIR" fetch origin '+refs/heads/main:refs/remotes/origin/main' >>"$LOG" 2>&1 || return 1
+    git -C "$AGENT_DIR" checkout -q --detach origin/main >>"$LOG" 2>&1 || return 1
+    [ -f "$AGENT_DIR/pm/lock.json" ] || { log 'ERROR: update target has no supported PM lock'; return 1; }
+    rm -f "$HERMES_HOME/pm-reconstruction.json"
+    /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" ensure --home "$HERMES_HOME" --source "$AGENT_DIR" >>"$LOG" 2>&1 || return 1
+    ensure_copilot_plugin
+    fix_launcher
+    return 0
+  fi
   local out rc=0; out=$(hermes_cmd update 2>&1) || rc=$?; echo "$out" >> "$LOG"
   if echo "$out" | grep -qiE 'install failed|did not finish|extractall.*unexpected keyword'; then
     log 'ERROR: updater reported incomplete dependency installation'; return 1
@@ -180,7 +202,7 @@ stop_gateway() {
   [ -z "$(gateway_pids)" ] || { log "ERROR: gateway would not stop; refusing data writes"; return 1; }
 }
 
-start_gateway() { rm -f "$PAUSE"; }   # the respawn loop starts it again within ~10s
+start_gateway() { rm -f "$PAUSE" "$HERMES_HOME/.bootstrap-lock"; }   # release recovery's boot hold too
 
 health_check() {
   local i deadline=$((SECONDS + ${HEALTH_TIMEOUT_SECONDS:-720}))
@@ -240,6 +262,9 @@ PYEOF
   stop_gateway || return 1
   local rev; rev=$(cat "$dir/.code-rev")
   git -C "$AGENT_DIR" checkout -qf "$rev" 2>>"$LOG" || { log 'ERROR: code rollback failed; gateway held for recovery'; return 1; }
+  if [ -s "$dir/.code-diff" ]; then
+    git -C "$AGENT_DIR" apply "$dir/.code-diff" 2>>"$LOG" || { log 'ERROR: local code restore failed; gateway held for recovery'; return 1; }
+  fi
   # Restore saved personal data as well as credentials/DBs. No deletion of old classic chats or code.
   /usr/bin/python3 - "$dir" "$HERMES_HOME" <<'PYEOF' || { log 'ERROR: restore failed; gateway held for recovery'; return 1; }
 import os, shutil, sqlite3, sys
@@ -285,6 +310,15 @@ for db in home.rglob('*.db'):
 PYEOF
   # If there were no plugins before this update, remove only our introduced provider plugin.
   [ -d "$dir/plugins" ] || rm -rf "$HERMES_HOME/plugins/github-copilot"
+  if legacy_source; then
+    # Legacy has no Webapp or --no-supervise. Preserve its untouched venv but
+    # hold modern launchers behind recovery until an explicit upgrade succeeds.
+    [ -d "$dir/agent-code/.hermes" ] || rm -rf "$AGENT_DIR/.hermes"
+    rm -f "$HERMES_HOME/pm-reconstruction.json" "$MARKER" "$PAUSE" "$HERMES_HOME/.webapp-building"
+    touch "$HERMES_HOME/.bootstrap-lock" "$HERMES_HOME/.webapp-build-failed"
+    log "rollback restored; legacy data/code at ${rev:0:10}; gateway held. Retry hermes-safe-update.sh --now or auto_update_agent"
+    return 0
+  fi
   if [ -f "$HERMES_HOME/pm-reconstruction.json" ]; then
     /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" ensure --home "$HERMES_HOME" --source "$AGENT_DIR" >>"$LOG" 2>&1 || { log 'ERROR: PM reconstruction failed; gateway held for recovery'; return 1; }
   fi

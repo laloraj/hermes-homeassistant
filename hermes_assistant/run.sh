@@ -104,9 +104,21 @@ fi
 if [ -x /opt/hermes-agent/node/bin/node ] && [ ! -e "${HERMES_HOME}/node" ]; then
     ln -s /opt/hermes-agent/node "${HERMES_HOME}/node"
 fi
-if [ "$RUNTIME_OK" = true ] && bashio::var.true "${AUTO_UPDATE_AGENT}" && [ -d "${AGENT_DST}/.git" ]; then
+# A pre-PM Python 3.11 checkout cannot reconstruct PM until its source is upgraded.
+# Its snapshot-backed updater deliberately does not require the old CLI/runtime.
+if [ ! -f "${HERMES_HOME}/.update-running" ] && bashio::var.true "${AUTO_UPDATE_AGENT}" \
+        && [ -d "${AGENT_DST}/.git" ] \
+        && { [ "$RUNTIME_OK" = true ] || [ ! -f "${AGENT_DIR}/pm/lock.json" ]; }; then
     "${SAFE_UPDATE}" --boot || bashio::log.warning 'Safe update failed; recovery remains available'
     "${SAFE_UPDATE}" --reset-toggle || true
+    # Recompute after migration, including failed rollback/hold state. Manual --now
+    # clears the same bootstrap hold when recovering after this boot has finished.
+    RUNTIME_OK=false
+    if [ ! -f "${HERMES_HOME}/.update-running" ] \
+            && /usr/bin/python3 "${ADDON_BIN}/addon_runtime.py" ensure --home "${HERMES_HOME}" --source "${AGENT_DIR}" >>"${HERMES_HOME}/logs/bootstrap.log" 2>&1; then
+        RUNTIME_OK=true
+        rm -f "${BOOTSTRAP_LOCK}"
+    fi
 fi
 "${SAFE_UPDATE}" --fix-launcher || true
 

@@ -120,8 +120,8 @@ class SnapshotPM(unittest.TestCase):
         environment = self.home / 'environments/old'
         (environment / 'bin').mkdir(parents=True)
         (environment / 'bin/python').touch()
-        (self.code / 'pm').mkdir()
-        (self.code / 'pm/lock.json').write_text('{"packages":{}}')
+        (self.code / 'pm').mkdir(exist_ok=True)
+        (self.code / 'pm/lock.json').write_text('{"packages":{},"fixture":"restored"}')
         # Include matching source inputs in the git revision restored by rollback.
         subprocess.run(['git', '-C', str(self.code), 'add', 'pm'], check=True)
         subprocess.run(['git', '-C', str(self.code), 'commit', '-qm', 'PM fixture'], check=True)
