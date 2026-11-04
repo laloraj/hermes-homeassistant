@@ -66,7 +66,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
 ENV UV_PYTHON_INSTALL_DIR=/opt/hermes-python
 RUN git clone --depth=1 --branch "${HERMES_AGENT_REF}" https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent-code \
     && uv venv /opt/hermes-agent-code/venv --python 3.14 \
-    && uv pip install --python /opt/hermes-agent-code/venv/bin/python --no-cache -e '/opt/hermes-agent-code[all,messaging]' \
+    && env UV_PROJECT_ENVIRONMENT=/opt/hermes-agent-code/venv uv sync --project /opt/hermes-agent-code --frozen --no-dev --extra all --extra messaging \
     && mkdir -p /opt/hermes-agent \
     && touch /opt/hermes-agent/.prebaked
 RUN set -eu; arch=$(dpkg --print-architecture); \

@@ -2,6 +2,12 @@ import pathlib,subprocess,unittest
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 class ReleasePublication(unittest.TestCase):
+ def test_both_images_use_upstream_frozen_dependency_overrides(self):
+  for path in ['hermes_assistant/Dockerfile','.github/workflows/retag.yml']:
+   text=(ROOT/path).read_text()
+   self.assertIn('uv sync --project /opt/hermes-agent-code --frozen --no-dev --extra all --extra messaging',text)
+   self.assertNotIn('uv pip install --python /opt/hermes-agent-code/venv/bin/python',text)
+
  def test_only_main_push_publishes_certified_images(self):
   workflow=(ROOT/'.github/workflows/retag.yml').read_text()
   tail=workflow.split('          # Neither architecture is published until BOTH fresh-boot smokes pass.',1)[1]
