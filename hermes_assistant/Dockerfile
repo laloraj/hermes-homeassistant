@@ -1,6 +1,6 @@
 # =============================================================================
 # Hermes Assistant — multi-stage build
-#   Stage 1 (builder): build-essential + uv + clone webui + pre-bake hermes-agent
+#   Stage 1 (builder): build-essential + uv + pre-bake hermes-agent
 #   Stage 2 (runtime): minimal apt, copy artefacts from builder
 # Net result: ~200MB smaller than single-stage, hermes-agent pre-installed so
 # first start is instant (no 5-10 min download).
@@ -11,7 +11,6 @@ ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 # ─── Stage 1 — builder ──────────────────────────────────────────────────────
 FROM ${BUILD_FROM} AS builder
 
-ARG HERMES_WEBUI_REF=v0.51.137
 # Pinned, not "main". A floating ref means every rebuild seeds a different
 # agent version, so two users on the same add-on version get different
 # software and a cosmetic upstream change can turn the build red (it did:
@@ -19,7 +18,7 @@ ARG HERMES_WEBUI_REF=v0.51.137
 # smoke test). Users who want newer can still set auto_update_agent: true,
 # which runs `hermes update` against the /data mirror at every boot.
 # Bump this deliberately; check https://github.com/NousResearch/hermes-agent/releases
-ARG HERMES_AGENT_REF=v2026.8.13
+ARG HERMES_AGENT_REF=v0.22.6
 ARG TTYD_VERSION=1.7.7
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -37,6 +36,7 @@ RUN apt-get update \
         git \
         python3 \
         python3-venv \
+        xz-utils \
         build-essential \
         python3-dev \
         libffi-dev \
@@ -62,92 +62,21 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
       | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh \
     && uv --version
 
-# Clone hermes-webui at pinned tag — keep the working tree CLEAN so the
-# in-app "Update" banner (which does `git stash; git pull; git stash pop`)
-# never hits a merge conflict from addon-side overrides. Earlier versions
-# wrote api/_version.py here, which collided with the upstream tag during
-# self-update; webui derives its version from git tags / package metadata
-# on its own, so the manual override is unnecessary.
-RUN git clone --depth=1 --branch "${HERMES_WEBUI_REF}" \
-        https://github.com/nesquena/hermes-webui.git /opt/hermes-webui
+# A Webapp-capable, fail-closed seed; Python and Node are explicit image assets.
+ENV UV_PYTHON_INSTALL_DIR=/opt/hermes-python
+RUN git clone --depth=1 --branch "${HERMES_AGENT_REF}" https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent-code \
+    && uv venv /opt/hermes-agent-code/venv --python 3.14 \
+    && uv pip install --python /opt/hermes-agent-code/venv/bin/python --no-cache -e '/opt/hermes-agent-code[all,messaging]' \
+    && mkdir -p /opt/hermes-agent \
+    && touch /opt/hermes-agent/.prebaked
+RUN set -eu; arch=$(dpkg --print-architecture); \
+    case "$arch" in amd64) nodearch=x64 ;; arm64) nodearch=arm64 ;; *) exit 1 ;; esac; \
+    curl -fsSL "https://nodejs.org/dist/v22.23.0/node-v22.23.0-linux-${nodearch}.tar.xz" -o /tmp/node.tar.xz; \
+    mkdir -p /opt/hermes-agent/node; \
+    tar -xJf /tmp/node.tar.xz -C /opt/hermes-agent/node --strip-components=1; \
+    rm /tmp/node.tar.xz
 
-# WebUI venv with minimal deps (pyyaml + cryptography)
-RUN uv venv /opt/hermes-webui/.venv --python python3 \
-    && uv pip install --python /opt/hermes-webui/.venv/bin/python \
-         --no-cache \
-         -r /opt/hermes-webui/requirements.txt
-
-# Pre-bake hermes-agent.
-# install.sh clones the repo via git + creates a uv-managed venv. We use
-# --skip-setup (no wizard) and --skip-browser (no Playwright/Chromium).
-# Best-effort: if install fails, image still builds — run.sh retries at
-# first runtime start. Log preserved at /opt/hermes-agent/install.log for
-# debugging when something goes wrong.
-RUN set +e; \
-    mkdir -p /opt/hermes-agent; \
-    export HERMES_HOME=/opt/hermes-agent; \
-    export HERMES_INSTALL_DIR=/opt/hermes-agent-code; \
-    export UV_NO_CONFIG=1; \
-    export PATH="/usr/local/bin:${PATH}"; \
-    curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_REF}/scripts/install.sh" \
-      -o /tmp/install-hermes.sh; \
-    if [ ! -s /tmp/install-hermes.sh ]; then \
-        echo ">> WARN: installer download failed, skipping pre-bake"; \
-        exit 0; \
-    fi; \
-    bash /tmp/install-hermes.sh \
-        --skip-setup \
-        --skip-browser \
-        --branch "${HERMES_AGENT_REF}" \
-        > /opt/hermes-agent/install.log 2>&1; \
-    rc=$?; \
-    # Locate the venv install.sh actually created — could be at any of:
-    #   $HERMES_INSTALL_DIR/.venv       (uv install in repo)
-    #   $HERMES_HOME/venv               (pip mode)
-    #   $HERMES_INSTALL_DIR/venv
-    AGENT_VENV=""; \
-    for cand in /opt/hermes-agent-code/.venv /opt/hermes-agent/venv /opt/hermes-agent-code/venv; do \
-        if [ -x "$cand/bin/hermes" ] || [ -x "$cand/bin/python" ]; then \
-            AGENT_VENV="$cand"; break; \
-        fi; \
-    done; \
-    if [ $rc -eq 0 ] && [ -n "$AGENT_VENV" ]; then \
-        echo ">> Hermes agent pre-baked OK at $AGENT_VENV"; \
-        echo "$AGENT_VENV" > /opt/hermes-agent/.venv-path; \
-        touch /opt/hermes-agent/.prebaked; \
-    else \
-        echo ">> WARN: pre-bake failed (rc=$rc, venv=$AGENT_VENV)"; \
-        echo ">> Last 60 lines of install log:"; \
-        tail -60 /opt/hermes-agent/install.log || true; \
-    fi; \
-    rm -f /tmp/install-hermes.sh; \
-    exit 0
-
-# Strip caches + non-runtime artefacts.
-# KEEP .git for both repos so user can `hermes update` / `git pull` in the
-# live install (mirrored to /data on first boot).
-RUN set -eux; \
-    find /opt/hermes-agent /opt/hermes-webui -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; \
-    rm -rf \
-        /opt/hermes-agent-code/ui-tui \
-        /opt/hermes-agent-code/website \
-        /opt/hermes-agent-code/tests \
-        /opt/hermes-agent-code/node_modules \
-        /opt/hermes-agent-code/docs \
-        /opt/hermes-agent-code/RELEASE_*.md \
-        /opt/hermes-webui/tests \
-        /opt/hermes-webui/docs \
-        /root/.cache /tmp/* /var/tmp/* 2>/dev/null || true; \
-    find /opt/hermes-agent-code -type d -name "test" -prune -exec rm -rf {} + 2>/dev/null || true; \
-    find /opt/hermes-agent-code -type d -name "tests" -prune -exec rm -rf {} + 2>/dev/null || true; \
-    # Aggressive .git gc so the kept history doesn't bloat the seed
-    for d in /opt/hermes-agent-code /opt/hermes-webui; do \
-        if [ -d "$d/.git" ]; then \
-            git -C "$d" gc --aggressive --prune=now 2>/dev/null || true; \
-        fi; \
-    done; \
-    echo "size after trim:"; du -sh /opt/hermes-agent-code /opt/hermes-agent /opt/hermes-webui
-
+# Keep the complete agent checkout for Webapp builds and in-place updates.
 
 # ─── Stage 2 — runtime (minimal) ────────────────────────────────────────────
 FROM ${BUILD_FROM}
@@ -158,16 +87,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HERMES_HOME=/data/hermes \
-    HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent \
-    HERMES_WEBUI_STATE_DIR=/data/hermes/webui \
-    HERMES_WEBUI_HOST=0.0.0.0 \
-    HERMES_WEBUI_PORT=8787 \
-    HERMES_WEBUI_PYTHON=/opt/hermes-webui/.venv/bin/python \
     PATH=/usr/local/bin:/usr/bin:/bin
 
 # Runtime apt — no compilers, no pip, no tini, no tzdata (base has it).
 # Keep: bash/curl/git/jq/python/openssh-client/ffmpeg/ripgrep — used by Hermes.
-# nginx-light multiplexes webui + ttyd behind a single Ingress port.
+# nginx-light multiplexes the Webapp + recovery + ttyd behind a single Ingress port.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -176,6 +100,9 @@ RUN apt-get update \
         bash \
         jq \
         python3 \
+        python3-yaml \
+        xz-utils \
+        openssl \
         openssh-client \
         ffmpeg \
         ripgrep \
@@ -187,26 +114,14 @@ RUN apt-get update \
 COPY --from=builder /opt/ttyd                 /usr/local/bin/ttyd
 COPY --from=builder /usr/local/bin/uv         /usr/local/bin/uv
 COPY --from=builder /usr/local/bin/uvx        /usr/local/bin/uvx
-COPY --from=builder /opt/hermes-webui         /opt/hermes-webui
+
 COPY --from=builder /opt/hermes-agent         /opt/hermes-agent
 COPY --from=builder /opt/hermes-agent-code    /opt/hermes-agent-code
+COPY --from=builder /opt/hermes-python        /opt/hermes-python
 
-# `hermes` dispatcher — prefers the user-writable mirror at /data
-# (where updates persist), falls back to the pre-baked image copy at /opt
-# during first boot before run.sh has mirrored.
-RUN printf '%s\n' \
-    '#!/bin/bash' \
-    '# Prefer mirrored install at /data (persists across rebuilds);' \
-    '# fall back to baked-in image copy on first boot.' \
-    'if [ -x /data/hermes/agent-code/venv/bin/python ]; then' \
-    '    exec /data/hermes/agent-code/venv/bin/python /data/hermes/agent-code/hermes "$@"' \
-    'elif [ -x /opt/hermes-agent-code/venv/bin/python ]; then' \
-    '    exec /opt/hermes-agent-code/venv/bin/python /opt/hermes-agent-code/hermes "$@"' \
-    'else' \
-    '    echo "hermes: agent not installed" >&2; exit 127' \
-    'fi' \
-    > /usr/local/bin/hermes \
-    && chmod +x /usr/local/bin/hermes
+# PM-aware dispatcher, shared by normal and upstream-patch images.
+COPY hermes-launcher.sh /usr/local/bin/hermes
+RUN chmod +x /usr/local/bin/hermes
 
 # Add-on entrypoint + nginx multiplex config
 COPY run.sh /run.sh
@@ -216,15 +131,20 @@ COPY bw-wrapper.sh /usr/local/bin/bw
 COPY bw-session.sh /usr/local/bin/bw-session
 RUN env PATH=/opt/hermes-agent/node/bin:/usr/local/bin:/usr/bin:/bin npm install --prefix /opt/bw @bitwarden/cli \
     && chmod +x /usr/local/bin/bw-shim.sh /usr/local/bin/bw-setup.sh /usr/local/bin/bw /usr/local/bin/bw-session
+COPY hermes-safe-update.sh /usr/local/bin/hermes-safe-update.sh
+COPY webapp-ticket.py /usr/local/bin/webapp-ticket.py
+COPY addon_health.py /usr/local/bin/addon_health.py
+COPY addon_config.py /usr/local/bin/addon_config.py
+COPY addon_runtime.py /usr/local/bin/addon_runtime.py
 COPY nginx.conf /etc/nginx/nginx.conf
-RUN chmod +x /run.sh \
+RUN chmod +x /run.sh /usr/local/bin/hermes-safe-update.sh /usr/local/bin/webapp-ticket.py /usr/local/bin/addon_health.py /usr/local/bin/addon_config.py \
     && mkdir -p /run/nginx /var/log/nginx
 
 EXPOSE 8787 7681
 
-# HA + docker observability. Webui /health responds 200 when ready.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8787/health || exit 1
+# Gateway/Webapp readiness with bounded startup grace; no classic dependency.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD ["curl", "-fsS", "http://127.0.0.1:8787/health"]
 
 # Defer to HA base s6-overlay ENTRYPOINT — it sets up bashio with-contenv.
 CMD ["/run.sh"]

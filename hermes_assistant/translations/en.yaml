@@ -4,13 +4,10 @@ configuration:
     description: Your time zone, for example America/Phoenix.
   enable_terminal:
     name: Enable setup terminal
-    description: Show the terminal tab inside the add-on panel.
+    description: Enable the independent setup/recovery terminal linked from the add-on recovery page.
   auto_update_agent:
     name: Update Hermes on next start
     description: Updates Hermes once on the next start (with a snapshot and automatic rollback), then switches itself off.
-  auto_update_webui:
-    name: Update the classic WebUI on every start
-    description: Leave off unless you know you need it.
   auto_configure_mcp:
     name: Connect Home Assistant MCP
     description: Registers the Home Assistant MCP Server with Hermes on every start.

@@ -1,5 +1,17 @@
 # Changelog
 
+## fork (laloraj) 1.10.0 — Webapp-only reliability release
+
+- **One Hermes UI:** the gateway Webapp is the only chat/settings interface. Removed classic WebUI installation, startup, updates, options and proxy routes. Existing `/data/hermes/webui` chats and `/data/hermes/webui-app` are kept untouched; no migration or deletion is performed. Retired bookmarks open recovery, not classic WebUI.
+- **Recovery without the agent:** `/recovery/` is served directly by nginx, with independent terminal and allowlisted logs plus rollback instructions. It works when the gateway, provider, Webapp build, ticket helper or optional integrations fail. No custom Hermes UI is installed. Recovery starts before slow bootstrap/update work.
+- **Real readiness:** `/ready` requires gateway HTTP health, Webapp HTML and a served JavaScript bundle. `/health` adds a bounded 15-minute initial startup/update grace; once ready, ordinary failures are not hidden by grace. Neither is satisfied by classic WebUI or an open nginx port.
+- **No hidden WebUI Python:** add-on configuration uses system Python with explicit `python3-yaml` in both image paths. YAML writes are atomic; malformed configuration is not overwritten.
+- **Safer updates:** check the update command's exit status, rebuild the Webapp, require strict Webapp readiness before success, keep the configured API inference check, serialize updater/rollback, stop only this home's gateway, and refuse a corrupt snapshot. Failure returns nonzero and reports whether rollback actually restored readiness.
+- **Data recovery:** consistent SQLite snapshots include WAL-only transactions and profile databases. Snapshot/restore includes memories, wiki, skills, scripts, cron, config/auth, existing plugins (including Copilot), old classic chats, and expanded backup selections. Portable PM intent (extras, declines, tool versions and source hashes) and small selection metadata are kept without copying runtime binaries. Startup/rollback reconstruct missing environments using the image’s Python 3.14; unsafe tar-filter compatibility patching is removed. Optional include paths are honored too. The last three complete snapshots are retained. Stop other CLI writers before manual rollback.
+- **Fresh installs:** both build paths seed Webapp-capable Hermes v0.22.6 with explicit Python 3.14; in-place Hermes upgrades remain supported. The retag patch removes only unused image `/opt/hermes-webui`, never `/data`. Both architectures must pass a real fresh-mirror/build/gateway/ticket smoke before either image is published.
+- Vaultwarden remains a separate add-on. Bitwarden and HA MCP integration failures do not block recovery or the Hermes gateway.
+- Tests cover readiness/startup grace, missing bundles, ticket failures, independent nginx/terminal/log recovery, update/build/health failures, SQLite integrity and personal data/plugin restoration. The isolated real PM cold-rebuild test recreated all 13 selected extras and eight tools, passed cold imports, and proved a no-bootstrap second run. Container smoke is a release gate; it cannot run on the HAOS development host without Docker.
+
 ## fork (laloraj) 1.9.1 — 2026-11-04
 
 - **Fix: Bitwarden did not start at boot in 1.9.0.** The add-on's start-up PATH has no `/usr/sbin`, so the small

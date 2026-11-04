@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reliability regressions
+        run: |
+          python3 -m pip install PyYAML
+          python3 -m unittest discover -s tests -v
+          for script in hermes_assistant/*.sh; do bash -n "$script"; done
+
       - name: Validate add-on config.yaml
         run: |
           # Syntax check via yq (preinstalled on GH runners)
@@ -145,6 +151,12 @@ jobs:
               echo "--- run.sh syntax ---"
               bash -n /run.sh && echo "✓ run.sh OK"
             '
+
+      - name: Fresh mirror, Webapp build and gateway smoke
+        run: |
+          docker run --rm --platform=${{ matrix.platform }} --entrypoint /usr/bin/python3 \
+            -e HERMES_IMAGE_SMOKE=1 -v "$PWD/tests:/tests:ro" \
+            hermes-assistant:ci-${{ matrix.arch }} /tests/image_boot.py
 
       - name: Image content size (informational)
         run: |

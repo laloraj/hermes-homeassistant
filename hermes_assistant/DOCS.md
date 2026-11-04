@@ -1,183 +1,78 @@
-# Hermes Assistant — Home Assistant Add-on
+# Hermes Assistant — Webapp-only add-on
 
-> **🔱 Fork notice:** this is a fork of
-> [nuttaruj/hermes-homeassistant](https://github.com/nuttaruj/hermes-homeassistant)
-> that additionally maps the real HA `/config` directory and the `/addons`
-> store into the container (`homeassistant_config:rw`, `addons:rw`), so Hermes
-> can read/write `configuration.yaml`, `automations.yaml`, etc. directly. The
-> upstream add-on does not expose these. See the main repo README/CHANGELOG
-> for the full diff. This grants the add-on significantly broader access to
-> your HA instance than stock — review before installing.
+This fork uses the stock Hermes **gateway Webapp**, not classic hermes-webui. HA admin Ingress is the browser authentication boundary. No terminal or chat ports are published to the LAN. The fork maps the real HA `/config` and `/addons` writable; treat shell access here as access to your HA installation.
 
-Runs the [Hermes Agent](https://hermes-agent.nousresearch.com/) (NousResearch)
-with [hermes-webui](https://github.com/nesquena/hermes-webui) inside Home
-Assistant. Includes a setup terminal (ttyd) so you can run `hermes setup` and
-authenticate any supported LLM provider (Anthropic, OpenAI, OAuth flows, …)
-directly from the browser.
+## Setup
 
-The Hermes agent and Web UI are **pre-baked into the image** and **mirrored
-to `/data` on first boot**. This means:
+1. Set `timezone` and leave `enable_terminal: true` during setup.
+2. Start the add-on and open its sidebar panel. The first Webapp build can take several minutes; a retry/recovery page appears meanwhile.
+3. Open `<ingress URL>/recovery/`, then **Setup / recovery terminal**. Run `hermes setup` for your model/provider and `hermes model` to switch later. Credentials persist in `/data/hermes`.
+4. Return to the root panel. A one-use launch ticket opens the normal Hermes Webapp.
 
-- First start is fast — no 5–10 min agent download.
-- Updates pulled via `hermes update` (in the setup terminal) or
-  `auto_update_agent: true` **persist across add-on restarts and rebuilds**.
-- Bumping the add-on version is not required to follow Hermes upstream
-  releases.
+There is no WebUI password, terminal password, floating UI plugin or LAN terminal URL. Terminal and logs are accessible only to admins through Ingress. If disabled, the recovery page explains how to enable the terminal again.
 
----
+## Add-on options
 
-## First-time setup
-
-1. **Install** the add-on from the store.
-2. Open the **Configuration** tab and set:
-   - `terminal_password` — protects the setup terminal (required if
-     `enable_terminal` is on)
-3. **Start** the add-on.
-4. Open the **Web UI** from the sidebar (or `Open Web UI` button).
-5. Open the **Setup Terminal** — either through the floating
-   gold "Setup Terminal" button at the bottom-right of the Web UI
-   panel, or directly at `<ingress_url>/terminal/`.
-
-### Setup
-
-Run `hermes setup` in the terminal. It is the universal entry point
-for every supported provider (Anthropic, OpenAI, Google Gemini,
-OpenRouter, GitHub Copilot, local models, and others) and works on
-any platform Home Assistant runs on. Pick the provider, paste an
-API key when prompted (or follow the OAuth device-code flow if the
-provider supports it), and `hermes setup` writes credentials to
-`/data/hermes/.env` where they persist across add-on restarts and
-image rebuilds.
-
-| Command | Purpose |
+| Option | Meaning |
 |---|---|
-| `hermes setup` | Interactive wizard for any supported LLM provider |
-| `hermes model` | Pick / switch provider + model |
-| `hermes update` | Pull the latest agent release |
-| `hermes --help` | Full command list |
+| `timezone` | IANA timezone, e.g. `America/Phoenix` |
+| `enable_terminal` | Enable the independent setup/recovery terminal (loopback only) |
+| `auto_update_agent` | One safe update at next start, then reset to false; not every-start updating |
+| `auto_configure_mcp` | Wire HA MCP into Hermes config. Requires HA's MCP Server integration. Other MCP entries are preserved |
+| `homeassistant_token` | Optional HA long-lived token. Empty uses the injected Supervisor token |
+| `watch_entities` | HA entity IDs to watch; empty watches none |
+| `bitwarden_server` | Optional server host/HTTPS URL; empty discovers a running Vaultwarden add-on |
+| `bitwarden_email`, `bitwarden_master_password` | Optional Bitwarden CLI login; empty disables it |
+| `bitwarden_client_id`, `bitwarden_client_secret` | Optional personal API key if two-step login is enabled |
 
-### Adding the terminal as a HA sidebar tab (optional)
+Vaultwarden remains a **separate add-on**, not an embedded server. The optional CLI uses a separate loopback TLS shim for private HTTP Vaultwarden. Integration failures are logged and do not prevent the gateway or recovery from starting. HA MCP is optional too.
 
-If you don't want to remember the LAN URL, add this to your HA
-`configuration.yaml` (replace the IP):
+## Routes and health
 
-```yaml
-panel_iframe:
-  hermes_terminal:
-    title: "Hermes Terminal"
-    icon: mdi:console
-    url: "http://192.168.1.10:7681"
-    require_admin: true
+| Path under the ingress URL | Purpose |
+|---|---|
+| `/` | Sign into the Webapp when ready; otherwise retry/recovery landing page |
+| `/webapp/` | Gateway's stock Hermes Webapp, on loopback `127.0.0.1:9120` |
+| `/recovery/` | Static nginx page: retry, terminal, logs, rollback command |
+| `/terminal/` | Independent ttyd shell, if enabled |
+| `/logs/bootstrap.log` | Runtime reconstruction/bootstrap log |
+| `/logs/gateway-addon.log` | Gateway startup/error log |
+| `/logs/webapp-build.log` | Webapp build log |
+| `/logs/safe-update.log` | Safe-update/rollback log |
+| `/logs/webapp-ticket.log` | Front-door helper log |
+| `/ready` | Strict readiness: gateway HTTP health, Webapp HTML and a served JS asset |
+| `/health` | Watchdog verdict: strict readiness plus finite startup/update grace |
+
+The add-on owns the Webapp's loopback host/port/enabled settings; other Hermes settings are preserved. Configuration is written atomically using system Python + explicitly installed `python3-yaml`. Invalid YAML is not overwritten; repair it in the terminal.
+
+Watchdog is a separate HA toggle and defaults off. `/health` permits at most 15 minutes from initial boot while bootstrap/build starts. Once healthy, normal failures are unhealthy immediately. Safe-update markers permit a bounded update window; stale build or update markers do not grant indefinite grace. Recovery does not depend on these checks and remains available if the gateway, build, provider, or Python ticket helper is down. If nginx itself is down, use HA's add-on Logs and restore an HA backup.
+
+Logs can contain private conversation/tool details; do not share raw logs publicly. Only five fixed log files are served; config/auth/secret files are not HTTP routes. No browser endpoint executes rollback: use the trusted terminal intentionally.
+
+## Safe Hermes updates
+
+Take an HA backup before upgrading the add-on itself. For Hermes core:
+
+- Ask the agent to run `hermes-safe-update.sh --now` detached, or run it in the terminal. The gateway restart ends the current agent chat; Telegram reports the outcome if the existing notification helper is configured.
+- Alternatively enable `auto_update_agent`, restart once, and the script resets the toggle afterward.
+- The script serializes operations; snapshots data consistently, stops this home's gateway, updates code, rebuilds the Webapp, restarts, then requires `/ready`-equivalent readiness. If an API key file is configured, a real model API request is checked too. An open API port alone never passes.
+- Failures attempt automatic rollback and return nonzero; notifications distinguish restored data/code from verified ready service. A failed restore holds the gateway stopped for recovery rather than writing into corrupt databases.
+- Do not use bare `hermes update` as a substitute: it bypasses the wrapper's snapshot and rollback safeguards.
+
+Manual recovery, **after stopping other CLI writers**:
+
+```sh
+hermes-safe-update.sh --rollback
+# Or choose an older complete snapshot:
+hermes-safe-update.sh --rollback /data/hermes/backups/pre-update/<snapshot>
 ```
 
-Restart HA — a "Hermes Terminal" entry appears in the sidebar next to
-the existing Hermes Agent panel. Both run inside the same add-on
-container; the terminal is the only thing on the LAN port.
+The last three complete snapshots are retained. Rollback validates snapshot DBs before changing live files, stops and waits for the scoped gateway, restores code/config/auth/personal files/plugins and SQLite data, clears stale DB sidecars, and rebuilds the matching Webapp. The recovery page remains usable throughout. Snapshots are not a substitute for off-device HA backups.
 
-You do **not** need to create a Home Assistant Long-Lived Access Token —
-the add-on uses the Supervisor proxy automatically (via `homeassistant_api`).
+## Data preservation and migration
 
----
+All persistent state lives under `/data/hermes`. Snapshot selection dynamically incorporates the backups skill's required and optional include lists and always covers config/auth, memories, wiki, skills, scripts, cron, plugins, desktop-plugins, vault, Webapp session-token, UI preferences, canonical/profile SQLite databases, and classic chat history when present. SQLite's backup API includes committed WAL data. PM intent is exported as `pm-reconstruction.json` (enabled/declined extras, tool versions and source-input hashes), alongside small selection facts/inputs and checkout launchers. Startup/rollback reconstruct missing environments with the image’s supported Python 3.14 bootstrap, not system Python 3.11 or weakened tar extraction filters. Runtime binaries are not duplicated; reconstruction requires matching source/locks and may need network access. Legitimate later user extras changes are preserved. Optional existing memory-store/kanban/MCP/native-sign-in state is included too. The wiki working tree and git history are copied without requiring a successful push.
 
-## Configuration options
+Version 1.10.0 removes the **image** classic seed `/opt/hermes-webui` and no longer mirrors, updates or serves classic WebUI. It never deletes existing `/data/hermes/webui` chats or `/data/hermes/webui-app` code. Old chats are retained for offline recovery; they are not automatically imported into the Webapp. Retired bookmarks open recovery. The deprecated `auto_update_webui` option is removed; if Supervisor reports an unknown old option, remove that option from the Configuration editor before starting.
 
-| Option | Required | Description |
-|---|---|---|
-| `timezone` | yes | IANA TZ, e.g. `Asia/Bangkok` |
-| `enable_terminal` | yes | `true` to expose setup terminal on port 7681 |
-| `auto_update_agent` | no | `true` → run `hermes update` every container start |
-| `auto_update_webui` | no | `true` → `git pull` Web UI every container start |
-| `auto_configure_mcp` | no | `true` (default) → wire HA Core's MCP Server into Hermes config every boot. Requires the "MCP Server" integration in HA |
-| `homeassistant_token` | no | Override the auto SUPERVISOR_TOKEN with your own LLA |
-| `bitwarden_server` | no | Host name or `https://` URL of your Bitwarden/Vaultwarden server. Empty = auto-use the Vaultwarden add-on on this HA |
-| `bitwarden_email` | no | Bitwarden account e-mail (with the master password, turns Bitwarden on) |
-| `bitwarden_master_password` | no | Master password; stored in `/data/hermes/secrets/bw_master` (root only) so jobs can unlock unattended |
-| `bitwarden_client_id` / `bitwarden_client_secret` | no | Personal API key, only if the account uses two-step login |
-| `watch_entities` | no | List of entity IDs Hermes should watch |
-
-All LLM provider credentials (Anthropic, OpenAI, Claude Max OAuth, …)
-are configured via the setup terminal (`hermes setup` /
-`claude setup-token`) and persist in `/data/hermes/.env`. The add-on
-no longer reads provider keys from add-on options.
-
-The Web UI is always served on internal port `8787` via HA Ingress.
-The setup terminal is always served on port `7681` (LAN, port-mapped).
-
----
-
-## What goes where
-
-| Path | Purpose | Persists | In backup |
-|---|---|---|---|
-| `/data/hermes/` | All Hermes state — configs, sessions, memories | yes | yes |
-| `/data/hermes/.env` | Credentials. Rewritten every start (mode 600) | yes | yes |
-| `/data/hermes/config.yaml` | Hermes platform config (kept after first create) | yes | yes |
-| `/data/hermes/agent-code/` | Hermes agent install (mirrored from image on first boot, updated in place by `hermes update`) | yes | partial |
-| `/data/hermes/agent-code/venv/` | Agent Python venv (~260MB, regenerable) | yes | **no** (excluded) |
-| `/data/hermes/webui-app/` | Web UI install (mirrored on first boot, `git pull`-able) | yes | partial |
-| `/data/hermes/webui-app/.venv/` | Web UI Python venv | yes | **no** (excluded) |
-| `/data/hermes/webui/` | Web UI sessions and workspace state | yes | yes |
-| `/config/claude_credentials.json` | Optional Claude OAuth dump | yes | yes |
-
-The `/opt/hermes-agent-code/` and `/opt/hermes-webui/` directories baked
-into the image are used **only on first boot** as the seed for the mirror.
-After that, the `/data` copies are the source of truth.
-
----
-
-
----
-
-## Security
-
-- **Web UI** binds `0.0.0.0` inside the container but is reachable only
-  via HA Ingress (port 8787 is not declared in `ports:` → not LAN-exposed).
-  HA's own login is the only auth layer; `panel_admin: true` restricts
-  the sidebar panel to HA admin users.
-- **Setup terminal** is exposed on the LAN via the Docker port mapping
-  (`7681/tcp: 7681`). ttyd basic-auth is the only barrier — **set a
-  strong `terminal_password`**. Disable via `enable_terminal: false`
-  between setup sessions if your LAN is untrusted.
-- `.env` is written with mode `600` (root-only).
-- HA Supervisor watchdog auto-restarts the container if the Web UI health
-  endpoint stops responding.
-
----
-
-## Updating
-
-Three update paths, in order from least to most intervention:
-
-1. **Hermes agent / Web UI follows upstream** (recommended day-to-day)
-   - Open the setup terminal, run `hermes update`
-   - Or enable `auto_update_agent: true` / `auto_update_webui: true` —
-     updates run on every container start
-   - Persists in `/data` across add-on restarts; bumping the add-on
-     version is NOT required
-2. **Add-on itself** (manifest, Dockerfile, base image)
-   - The repo owner bumps `version:` in `config.yaml` and pushes to
-     GitHub. HA Supervisor shows the update; users click "Update"
-     (or enable HA's per-add-on auto-update toggle)
-3. **Force agent reinstall from image seed**
-   - Setup terminal:
-     ```
-     rm -rf /data/hermes/agent-code
-     ```
-   - Restart the add-on. First boot re-mirrors the baked-in seed
-     (resets to the version that shipped with the current image).
-
----
-
-## Troubleshooting
-
-- **Web UI shows nothing** — check the add-on log. After `Starting Hermes
-  Web UI on 127.0.0.1:8787` the UI is ready. Watchdog will restart if not.
-- **`hermes setup` says agent missing** — check
-  `/data/hermes/.bootstrap-done` exists and `/data/hermes/venv/` is
-  populated. If not, the pre-bake failed; run `bootstrap.py` manually:
-  ```
-  /opt/hermes-webui/.venv/bin/python /opt/hermes-webui/bootstrap.py --no-browser
-  ```
-- **HA integration fails** — log should say either
-  `Using auto-injected SUPERVISOR_TOKEN` or `Using user-supplied LLA`.
-  If both are missing, set `homeassistant_token` manually.
+The agent mirror `/data/hermes/agent-code` remains the active code source and stays in-place upgradable. Existing mirrors are not replaced with the image seed; if yours predates Webapp support (Hermes v0.22.6), use the safe-update command in recovery first. Fresh installs seed v0.22.6, Python 3.14 and Node in the image. Both build paths test a real first mirror, bundle build, running gateway, HTTP asset, launch ticket and terminal—not just CLI help.

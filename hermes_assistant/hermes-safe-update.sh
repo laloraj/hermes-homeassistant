@@ -9,7 +9,8 @@
 #
 # Personal data is never touched by the update itself: it lives in $HERMES_HOME, outside the git checkout
 # ($AGENT_DIR). The snapshot is a second copy of it, so a failed update cannot lose memory, wiki or scripts.
-set -u
+set -uo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 HERMES_HOME="${HERMES_HOME:-/data/hermes}"
 AGENT_DIR="${AGENT_DIR:-$HERMES_HOME/agent-code}"
 SNAP_ROOT="$HERMES_HOME/backups/pre-update"
@@ -18,71 +19,97 @@ PAUSE="$HERMES_HOME/.update-running"
 LOG="$HERMES_HOME/logs/safe-update.log"
 KEEP=3
 API_PORT="${API_PORT:-8642}"
+HERMES_BIN="${HERMES_BIN:-/usr/local/bin/hermes}"
+HEALTH_SCRIPT="${HEALTH_SCRIPT:-$(dirname "$0")/addon_health.py}"
+HEALTH_ATTEMPTS="${HEALTH_ATTEMPTS:-180}"
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-5}"
 export HERMES_HOME
 mkdir -p "$SNAP_ROOT" "$(dirname "$LOG")"
 
-log()    { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+log()    { echo "$(date '+%F %T') $*" | tee -a "$LOG" >&2; }
 notify() { [ -x "$HERMES_HOME/tools/bin/tg-notify" ] && "$HERMES_HOME/tools/bin/tg-notify" "$1" >/dev/null 2>&1; log "NOTIFY: $1"; }
-hermes_cmd() { if [ -x "$AGENT_DIR/venv/bin/python" ]; then "$AGENT_DIR/venv/bin/python" "$AGENT_DIR/hermes" "$@"; else hermes "$@"; fi; }
-version() { hermes_cmd --version 2>/dev/null | head -1; }
+hermes_cmd() { "$HERMES_BIN" "$@" 9>&-; }
+version() { local out; out=$(hermes_cmd --version 2>/dev/null) || return 1; printf '%s\n' "${out%%$'\n'*}"; }
 
 # Everything personal that must survive. Single source of truth: the backups skill's include list.
 include_list() {
-  python3 - <<'EOF'
+  /usr/bin/python3 - <<'EOF'
 import json, os
 home = os.environ["HERMES_HOME"]
 fallback = ["config.yaml", "SOUL.md", ".env", "auth.json", "memories", "wiki", "skills", "scripts", "cron",
             "hooks", "platforms", "secrets", "tracking", "receipts", "bill-analysis", "channel_directory.json",
             "pairing", "state.db", "response_store.db", "kanban.db", "tools/bin", "tools/gog-home",
-            "tools/ha-update", "whatsapp/session", "profiles"]
+            "tools/ha-update", "whatsapp/session", "profiles", "plugins", "desktop-plugins", "webapp/session-token", "vault",
+            "projects.db", "ui-preferences.json", "verification_evidence.db", "webui", "sessions",
+            "agent-code/.hermes", "tools/facts.json", "pm-reconstruction.json",
+            "memory_store.db", "kanban/boards", "mcp-tokens", "native-sign-in-tokens.json", "sign-in-registration.json"]
+# PM dependency selection and inputs are small metadata; never snapshot tool binaries/environments.
+from pathlib import Path
+for selection in Path(home, "installs").glob("*/facts.json"):
+    fallback.append(str(selection.relative_to(home)))
+for declined in Path(home, "installs").glob("*/declined-extras.json"):
+    fallback.append(str(declined.relative_to(home)))
+for inputs in Path(home, "installs").glob("*/inputs"):
+    fallback.append(str(inputs.relative_to(home)))
 try:
     cfg = json.load(open(os.path.join(home, "skills/devops/backups/config.json")))
-    items = cfg.get("hermes_include") or []
+    items = (cfg.get("hermes_include") or []) + (cfg.get("hermes_optional_include") or [])
 except Exception:
     items = []
 seen = []
 for p in list(items) + fallback:
-    if p not in seen and os.path.exists(os.path.join(home, p)):
+    if (isinstance(p, str) and not os.path.isabs(p) and ".." not in p.split("/")
+            and "\n" not in p and "\r" not in p and p not in seen and os.path.exists(os.path.join(home, p))):
         seen.append(p)
 print("\n".join(seen))
 EOF
 }
 
-backup_db() {
-  # A consistent copy of a live SQLite database (a plain cp can catch it mid-write).
-  python3 - "$1" "$2" <<'PYEOF'
-import sqlite3, sys
-src = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True, timeout=30)
-dst = sqlite3.connect(sys.argv[2])
-src.backup(dst)
-dst.close()
-src.close()
-PYEOF
-}
 
 snapshot() {
-  local ts dir; ts=$(date +%Y%m%d-%H%M%S); dir="$SNAP_ROOT/$ts"; mkdir -p "$dir"
-  # Commit and push any wiki edits first so git also holds the latest copy.
-  if [ -d "$HERMES_HOME/wiki/.git" ]; then
-    git -C "$HERMES_HOME/wiki" add -A >/dev/null 2>&1
-    git -C "$HERMES_HOME/wiki" commit -qm "wiki: snapshot before Hermes update" >/dev/null 2>&1 || true
-    git -C "$HERMES_HOME/wiki" push -q >/dev/null 2>&1 || true
+  local ts dir; ts=$(date +%Y%m%d-%H%M%S-%N); dir="$SNAP_ROOT/$ts"
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  include_list > "$dir/.include" || return 1
+  # Copy every SQLite file (including profiles) through its backup API, never raw WAL pages.
+  /usr/bin/python3 - "$HERMES_HOME" "$dir" <<'PYEOF' || { rm -rf "$dir"; return 1; }
+import os, shutil, sqlite3, sys
+from pathlib import Path
+home, dest = map(Path, sys.argv[1:])
+def copy(src, dst):
+    if str(src).endswith(('.db-wal', '.db-shm', '.db-journal')):
+        return str(dst)
+    if str(src).endswith('.db'):
+        with sqlite3.connect('file:%s?mode=ro' % src, uri=True, timeout=30) as source:
+            with sqlite3.connect(str(dst)) as target:
+                source.backup(target)
+                if target.execute('pragma integrity_check').fetchone()[0] != 'ok':
+                    raise RuntimeError('SQLite snapshot integrity failed')
+        shutil.copystat(src, dst)
+        return str(dst)
+    return shutil.copy2(src, dst)
+for name in (dest / '.include').read_text().splitlines():
+    src, dst = home / name, dest / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True, copy_function=copy, dirs_exist_ok=True)
+    else:
+        copy(src, dst)
+PYEOF
+  /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" export --home "$HERMES_HOME" --source "$AGENT_DIR" --target "$dir/pm-reconstruction.json" || { rm -rf "$dir"; return 1; }
+  if [ -f "$dir/pm-reconstruction.json" ]; then
+    grep -qx 'pm-reconstruction.json' "$dir/.include" || printf '%s\n' pm-reconstruction.json >> "$dir/.include"
   fi
-  while IFS= read -r p; do
-    mkdir -p "$dir/$(dirname "$p")"
-    case "$p" in
-      state.db|response_store.db|kanban.db) backup_db "$HERMES_HOME/$p" "$dir/$p" || log "WARN: could not back up $p" ;;
-      *) cp -a "$HERMES_HOME/$p" "$dir/$p" 2>/dev/null || log "WARN: could not copy $p" ;;
-    esac
-  done < <(include_list)
-  git -C "$AGENT_DIR" rev-parse HEAD > "$dir/.code-rev" 2>/dev/null
-  version > "$dir/.version"
-  # An integrity check: the snapshot must hold the files that matter most.
-  for must in memories wiki skills config.yaml; do
-    [ -e "$dir/$must" ] || { log "ERROR: snapshot is missing $must"; echo ""; return 1; }
-  done
-  # Keep only the newest $KEEP snapshots.
-  ls -1d "$SNAP_ROOT"/*/ 2>/dev/null | sort | head -n -"$KEEP" | xargs -r rm -rf
+  git -C "$AGENT_DIR" rev-parse HEAD > "$dir/.code-rev" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  version > "$dir/.version" || { rm -rf "$dir"; return 1; }
+  [ -f "$dir/config.yaml" ] || { log 'ERROR: snapshot missing config.yaml'; rm -rf "$dir"; return 1; }
+  # Prune only complete snapshots, after a new valid snapshot exists.
+  /usr/bin/python3 - "$SNAP_ROOT" "$KEEP" <<'PYEOF'
+import shutil, sys
+from pathlib import Path
+items = sorted(p for p in Path(sys.argv[1]).iterdir() if (p / '.code-rev').is_file())
+for path in items[:-int(sys.argv[2])]:
+    shutil.rmtree(path)
+PYEOF
   echo "$dir"
 }
 
@@ -90,25 +117,6 @@ ensure_git_main() {
   # The image pins a release tag (detached HEAD), so `hermes update` finds no branch. Give it one.
   git -C "$AGENT_DIR" config --get-all remote.origin.fetch | grep -q 'heads/main' \
     || git -C "$AGENT_DIR" config --add remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
-}
-
-patch_old_python() {
-  # Python < 3.11.4 has no tarfile extraction filters; the package manager needs them. Idempotent.
-  local f="$AGENT_DIR/pm/store.py"
-  [ -f "$f" ] || return 0
-  grep -q 'hasattr(tarfile, "data_filter")' "$f" && return 0
-  python3 - "$f" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-old = "        tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))"
-new = ('        if not hasattr(tarfile, "data_filter"):  # Python < 3.11.4: no extraction filters\n'
-       '            tf.extractall(dest, members=[m for m in tf if not (m.issym() and os.path.isabs(m.linkname))'
-       ' and not os.path.isabs(m.name) and ".." not in m.name.split("/")])\n'
-       '        else:\n'
-       '            tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))')
-if old in s:
-    open(p, "w").write(s.replace(old, new)); print("patched", p)
-EOF
 }
 
 ensure_copilot_plugin() {
@@ -133,26 +141,33 @@ fix_launcher() {
 
 do_update() {
   ensure_git_main
-  local out; out=$(hermes_cmd update 2>&1); echo "$out" >> "$LOG"
-  if echo "$out" | grep -q -E "extractall|install failed|did not finish"; then
-    log "updater hit the old-Python problem; applying the compatibility patch and installing dependencies"
-    patch_old_python
-    hermes_cmd pm install >>"$LOG" 2>&1 || { log "ERROR: pm install failed"; return 1; }
+  local out rc=0; out=$(hermes_cmd update 2>&1) || rc=$?; echo "$out" >> "$LOG"
+  if echo "$out" | grep -qiE 'install failed|did not finish|extractall.*unexpected keyword'; then
+    log 'ERROR: updater reported incomplete dependency installation'; return 1
   fi
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: updater exited $rc"; return "$rc"
+  fi
+  /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" export --home "$HERMES_HOME" --source "$AGENT_DIR" --target "$HERMES_HOME/pm-reconstruction.json" || return 1
   ensure_copilot_plugin
   fix_launcher
   return 0
 }
 
 gateway_pids() {
-  # PIDs of the gateway that belongs to THIS $HERMES_HOME (a test copy must never touch the live one).
-  local p c
-  for p in /proc/[0-9]*; do
-    c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-    case "$c" in *"hermes gateway run"*)
-      tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx "HERMES_HOME=$HERMES_HOME" && echo "${p#/proc/}";;
-    esac
-  done
+  /usr/bin/python3 - <<'PYEOF'
+import os
+from pathlib import Path
+for p in Path('/proc').glob('[0-9]*'):
+    try:
+        args = (p / 'cmdline').read_bytes().split(b'\0')
+        env = (p / 'environ').read_bytes().split(b'\0')
+        if any(args[i:i+2] == [b'gateway', b'run'] for i in range(len(args)-1)) and (
+            ('HERMES_HOME=' + os.environ['HERMES_HOME']).encode() in env):
+            print(p.name)
+    except (OSError, PermissionError):
+        pass
+PYEOF
 }
 
 stop_gateway() {
@@ -161,55 +176,149 @@ stop_gateway() {
   touch "$PAUSE"
   local i pids
   for i in $(seq 1 30); do pids=$(gateway_pids); [ -z "$pids" ] && return 0; kill $pids 2>/dev/null; sleep 1; done
-  pids=$(gateway_pids); [ -n "$pids" ] && { kill -9 $pids 2>/dev/null; sleep 2; }
+  pids=$(gateway_pids); [ -z "$pids" ] || { kill -9 $pids 2>/dev/null; sleep 2; }
+  [ -z "$(gateway_pids)" ] || { log "ERROR: gateway would not stop; refusing data writes"; return 1; }
 }
 
 start_gateway() { rm -f "$PAUSE"; }   # the respawn loop starts it again within ~10s
 
 health_check() {
-  # A real check: gateway port up, then a real model call through the API server.
-  local key_file="$HERMES_HOME/secrets/hermes_api_server_key" i
-  for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/"$API_PORT") 2>/dev/null && break; sleep 5; done
-  (echo > /dev/tcp/127.0.0.1/"$API_PORT") 2>/dev/null || { log "health: gateway port $API_PORT never opened"; return 1; }
-  [ -r "$key_file" ] || { log "health: no API key file, port check only"; return 0; }
-  local r; r=$(curl -s -m 120 -H "Authorization: Bearer $(cat "$key_file")" -H "Content-Type: application/json" \
-      "http://127.0.0.1:$API_PORT/v1/chat/completions" \
-      -d '{"model":"hermes-agent","messages":[{"role":"user","content":"reply with just: ok"}]}')
-  echo "$r" | grep -qi '"content": *"ok' && return 0
-  log "health: model call failed: ${r:0:200}"; return 1
+  local i deadline=$((SECONDS + ${HEALTH_TIMEOUT_SECONDS:-720}))
+  for i in $(seq 1 "$HEALTH_ATTEMPTS"); do
+    /usr/bin/python3 "$HEALTH_SCRIPT" --ready >/dev/null 2>&1 && break
+    if [ "$i" = "$HEALTH_ATTEMPTS" ] || [ "$SECONDS" -ge "$deadline" ]; then
+      log 'health: gateway/Webapp HTTP or bundle not ready'; return 1
+    fi
+    sleep "$HEALTH_INTERVAL"
+  done
+  # Optional configured API server: exercise inference too, but never accept API-only readiness.
+  # No API key means this platform is not configured; Webapp remains mandatory.
+  local key_file="$HERMES_HOME/secrets/hermes_api_server_key"
+  if [ -r "$key_file" ]; then
+    API_PORT="$API_PORT" /usr/bin/python3 - "$key_file" <<'PYEOF' || { log 'health: configured model API check failed'; return 1; }
+import json, os, sys, urllib.request
+key = open(sys.argv[1]).read().strip()
+data = json.dumps({'model':'hermes-agent', 'messages':[{'role':'user','content':'reply with just: ok'}]}).encode()
+try:
+    req = urllib.request.Request('http://127.0.0.1:%s/v1/chat/completions' % os.environ['API_PORT'],
+        data=data, headers={'Authorization':'Bearer '+key, 'Content-Type':'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=120) as response:
+        content = json.load(response)['choices'][0]['message']['content']
+    sys.exit(0 if isinstance(content, str) and content.strip().lower().rstrip('.') == 'ok' else 1)
+except Exception:
+    sys.exit(1)  # Provider responses and keys must not leak into logs.
+PYEOF
+  fi
+  return 0
 }
 
 do_rollback() {
-  local dir="${1:-$(ls -1d "$SNAP_ROOT"/*/ 2>/dev/null | sort | tail -1)}"; dir="${dir%/}"
-  [ -d "$dir" ] || { log "ERROR: no snapshot to restore"; return 1; }
-  log "rolling back to $dir ($(cat "$dir/.version" 2>/dev/null))"
-  stop_gateway
-  local rev; rev=$(cat "$dir/.code-rev" 2>/dev/null)
-  [ -n "$rev" ] && git -C "$AGENT_DIR" checkout -qf "$rev" 2>>"$LOG"
-  # Restore only the files an update can change. Replace atomically (copy beside, then rename) and drop
-  # stale -wal/-shm/-journal files so a restored database is never mixed with the failed one's pages.
-  local p
-  for p in config.yaml .env auth.json state.db response_store.db kanban.db; do
-    [ -e "$dir/$p" ] || continue
-    rm -f "$HERMES_HOME/$p-wal" "$HERMES_HOME/$p-shm" "$HERMES_HOME/$p-journal"
-    cp -a "$dir/$p" "$HERMES_HOME/$p.restore.tmp" && mv -f "$HERMES_HOME/$p.restore.tmp" "$HERMES_HOME/$p"
-  done
-  [ -d "$dir/cron" ] && cp -a "$dir/cron/." "$HERMES_HOME/cron/" 2>>"$LOG"
-  rm -rf "$HERMES_HOME/plugins/github-copilot"
-  python3 - "$HERMES_HOME/state.db" <<'PYEOF' || log "WARN: restored state.db failed its integrity check"
-import sqlite3, sys
-r = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True).execute("pragma integrity_check").fetchone()[0]
-sys.exit(0 if r == "ok" else 1)
+  local dir="${1:-}"
+  if [ -z "$dir" ]; then
+    dir=$(/usr/bin/python3 - "$SNAP_ROOT" <<'PYEOF'
+import sys
+from pathlib import Path
+items = sorted(p for p in Path(sys.argv[1]).iterdir()
+               if (p / '.code-rev').is_file() and (p / 'config.yaml').is_file())
+print(items[-1] if items else '')
 PYEOF
-  rm -f "$MARKER"; start_gateway
-  log "rollback done; code at ${rev:0:10}"
+)
+  fi
+  dir="${dir%/}"
+  [ -d "$dir" ] && [ -f "$dir/.code-rev" ] || { log 'ERROR: no valid snapshot to restore'; return 1; }
+  # Validate every snapshot DB before changing code or live files. Missing optional DBs are fine.
+  /usr/bin/python3 - "$dir" <<'PYEOF' || { log 'ERROR: snapshot database integrity failed; restore refused'; return 1; }
+import sqlite3, sys
+from pathlib import Path
+for db in Path(sys.argv[1]).rglob('*.db'):
+    with sqlite3.connect('file:%s?mode=ro' % db, uri=True) as conn:
+        if conn.execute('pragma integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('invalid snapshot')
+PYEOF
+  log "rolling back to $dir"
+  stop_gateway || return 1
+  local rev; rev=$(cat "$dir/.code-rev")
+  git -C "$AGENT_DIR" checkout -qf "$rev" 2>>"$LOG" || { log 'ERROR: code rollback failed; gateway held for recovery'; return 1; }
+  # Restore saved personal data as well as credentials/DBs. No deletion of old classic chats or code.
+  /usr/bin/python3 - "$dir" "$HERMES_HOME" <<'PYEOF' || { log 'ERROR: restore failed; gateway held for recovery'; return 1; }
+import os, shutil, sqlite3, sys
+from pathlib import Path
+src, home = map(Path, sys.argv[1:])
+manifest = src / '.include'
+names = manifest.read_text().splitlines() if manifest.exists() else [
+    p.name for p in src.iterdir() if not p.name.startswith('.') or p.name == '.env']
+for name in names:
+    if not name or Path(name).is_absolute() or '..' in Path(name).parts:
+        raise ValueError('unsafe snapshot path')
+    old, target = src / name, home / name
+    if not old.exists():
+        continue
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(target.name + '.restore.tmp')
+    if staged.is_dir():
+        shutil.rmtree(staged)
+    elif staged.exists() or staged.is_symlink():
+        staged.unlink()
+    if old.is_dir():
+        shutil.copytree(old, staged, symlinks=True)
+        # Gateway is stopped. Keep original until replacement is fully copied.
+        previous = target.with_name(target.name + '.restore.previous')
+        if previous.exists():
+            shutil.rmtree(previous)
+        if target.exists():
+            os.replace(target, previous)
+        os.replace(staged, target)
+        if previous.exists():
+            shutil.rmtree(previous)
+    else:
+        shutil.copy2(old, staged)
+        for suffix in ('-wal','-shm','-journal') if name.endswith('.db') else ():
+            Path(str(target) + suffix).unlink(missing_ok=True)
+        os.replace(staged, target)
+for db in home.rglob('*.db'):
+    if 'agent-code' in db.relative_to(home).parts or 'backups' in db.relative_to(home).parts:
+        continue
+    with sqlite3.connect('file:%s?mode=ro' % db, uri=True) as conn:
+        if conn.execute('pragma integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('restored database invalid')
+PYEOF
+  # If there were no plugins before this update, remove only our introduced provider plugin.
+  [ -d "$dir/plugins" ] || rm -rf "$HERMES_HOME/plugins/github-copilot"
+  if [ -f "$HERMES_HOME/pm-reconstruction.json" ]; then
+    /usr/bin/python3 "$(dirname "$0")/addon_runtime.py" ensure --home "$HERMES_HOME" --source "$AGENT_DIR" >>"$LOG" 2>&1 || { log 'ERROR: PM reconstruction failed; gateway held for recovery'; return 1; }
+  fi
+  fix_launcher
+  rm -f "$MARKER" "$HERMES_HOME/.bootstrap-lock" "$HERMES_HOME/.webapp-building" "$HERMES_HOME/.webapp-build-failed"
+  # Code changed: ensure a matching browser bundle before calling rollback healthy.
+  if ! hermes_cmd webapp --build-only >>"$LOG" 2>&1; then
+    touch "$HERMES_HOME/.webapp-build-failed"
+    log 'WARN: rollback bundle rebuild failed; recovery remains available'
+  fi
+  start_gateway
+  log "rollback restored; code at ${rev:0:10}; readiness pending"
+}
+
+verify_update() {
+  [ -f "$MARKER" ] || return 0
+  local snap before
+  snap=$(sed -n 1p "$MARKER"); before=$(sed -n 2p "$MARKER")
+  if health_check; then
+    rm -f "$MARKER"; notify "Hermes updated: $before -> $(version). Snapshot kept at $snap"
+  else
+    notify "Hermes update failed its health check; attempting rollback to $before"
+    do_rollback "$snap" || { notify 'Hermes rollback failed; use add-on recovery terminal'; return 1; }
+    if health_check; then notify "Hermes rolled back to $before; Webapp ready"
+    else notify 'Hermes data/code restored, but Webapp is not ready; use add-on recovery'; fi
+    return 1
+  fi
 }
 
 reset_toggle() {
   # One-shot: switch auto_update_agent back off through the Supervisor so the next restart does not retry.
   # Sends the full option set back (the API replaces options), changing only that one key.
   [ -n "${SUPERVISOR_TOKEN:-}" ] || { log "toggle: no SUPERVISOR_TOKEN, leaving auto_update_agent as is"; return 0; }
-  python3 - <<'PYEOF'
+  /usr/bin/python3 - <<'PYEOF'
 import json, os, sys, urllib.request
 base = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 hdr = {"Authorization": "Bearer " + os.environ["SUPERVISOR_TOKEN"], "Content-Type": "application/json"}
@@ -227,32 +336,42 @@ PYEOF
   [ $? -eq 0 ] || log "WARN: could not reset the auto_update_agent toggle"
 }
 
+# Kernel-backed lock releases on exit/crash. Keep one updater/rollback per home.
+# --verify is called in-process by --now, avoiding recursive lock acquisition.
+exec 9>"$HERMES_HOME/.safe-update.lock"
+flock -n 9 || { log 'ERROR: another safe update/rollback is running'; exit 1; }
 case "${1:-}" in
   --snapshot-only) snapshot ;;
-  --rollback)      do_rollback "${2:-}" ;;
-  --reset-toggle)  reset_toggle ;;
-  --fix-launcher)  fix_launcher ;;
-  --boot)
-    before=$(version); snap=$(snapshot) || { notify "Hermes update skipped: snapshot failed"; exit 1; }
-    # Normally no gateway exists yet at boot; stop any that does so code never changes under a running one.
-    stop_gateway
-    do_update || { notify "Hermes update failed before restart; rolling back"; do_rollback "$snap"; exit 1; }
-    after=$(version)
-    if [ "$after" = "$before" ] && [ "$(git -C "$AGENT_DIR" rev-parse HEAD 2>/dev/null)" = "$(cat "$snap/.code-rev" 2>/dev/null)" ]; then
-      start_gateway; notify "Hermes is already up to date ($after); nothing changed"; exit 0
+  --health-check) health_check ;;
+  --rollback) do_rollback "${2:-}" ;;
+  --reset-toggle) reset_toggle ;;
+  --fix-launcher) fix_launcher ;;
+  --verify) verify_update ;;
+  --boot|--now)
+    mode=$1
+    [ ! -f "$MARKER" ] || { log 'ERROR: pending update needs --verify or --rollback first'; exit 1; }
+    [ ! -f "$PAUSE" ] || { log 'ERROR: interrupted update needs --rollback first'; exit 1; }
+    before=$(version) || { log 'ERROR: launcher unavailable; use --rollback from recovery'; exit 1; }
+    snap=$(snapshot) || { notify 'Hermes update skipped: snapshot failed'; exit 1; }
+    stop_gateway || exit 1
+    if ! do_update; then
+      notify 'Hermes update failed; attempting rollback'
+      do_rollback "$snap" || exit 1
+      exit 1
     fi
-    printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; start_gateway; log "updated: $before -> $after; verify pending" ;;
-  --verify)
-    [ -f "$MARKER" ] || exit 0
-    snap=$(sed -n 1p "$MARKER"); before=$(sed -n 2p "$MARKER")
-    if health_check; then rm -f "$MARKER"; notify "Hermes updated: $before -> $(version). Snapshot kept at $snap"
-    else notify "Hermes update to $(version) failed its health check; rolled back to $before"; do_rollback "$snap"; fi ;;
-  --now)
-    before=$(version); snap=$(snapshot) || { notify "Hermes update skipped: snapshot failed"; exit 1; }
-    log "snapshot $snap; updating from $before"
-    stop_gateway
-    if do_update; then
-      printf '%s\n%s\n' "$snap" "$before" > "$MARKER"; start_gateway; sleep 15; "$0" --verify
-    else notify "Hermes update failed; rolling back to $before"; do_rollback "$snap"; fi ;;
+    after=$(version)
+    # Always rebuild/check the Webapp, even when the code revision did not move.
+    touch "$HERMES_HOME/.webapp-building"
+    if ! hermes_cmd webapp --build-only >>"$LOG" 2>&1; then
+      rm -f "$HERMES_HOME/.webapp-building"
+      notify 'Hermes Webapp build failed; attempting rollback'
+      do_rollback "$snap" || exit 1
+      exit 1
+    fi
+    rm -f "$HERMES_HOME/.webapp-building" "$HERMES_HOME/.webapp-build-failed"
+    printf '%s\n%s\n' "$snap" "$before" > "$MARKER"
+    start_gateway
+    if [ "$mode" = --now ]; then verify_update
+    else log "updated: $before -> $after; Webapp readiness verification pending"; fi ;;
   *) sed -n 2,9p "$0"; exit 2 ;;
 esac

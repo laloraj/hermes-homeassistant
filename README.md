@@ -1,72 +1,39 @@
 # Hermes Home Assistant Add-on (fork)
 
-> **This is a fork of [nuttaruj/hermes-homeassistant](https://github.com/nuttaruj/hermes-homeassistant)
-> with one deliberate change:** the add-on additionally maps the real Home
-> Assistant `/config` directory and the `/addons` store into the container
-> (`homeassistant_config:rw` and `addons:rw` in `hermes_assistant/config.yaml`).
-> This lets Hermes read/write HA's actual `configuration.yaml`,
-> `automations.yaml`, etc., and inspect installed add-ons — neither of which
-> the upstream add-on exposes. See [CHANGELOG.md](hermes_assistant/CHANGELOG.md)
-> and the diff in
-> [`hermes_assistant/config.yaml`](hermes_assistant/config.yaml) for the exact
-> change. Everything else in this repo is unmodified from upstream.
->
-> Granting `homeassistant_config:rw` means this add-on (and anything that can
-> execute code inside it) can read and overwrite your live HA configuration —
-> treat it as a materially larger trust boundary than the stock add-on.
+Runs [Hermes Agent](https://hermes-agent.nousresearch.com/docs) with its **gateway Webapp** behind Home Assistant admin Ingress. There is no separate classic WebUI or custom Hermes interface.
+
+This fork of [nuttaruj/hermes-homeassistant](https://github.com/nuttaruj/hermes-homeassistant) adds safe in-place updates, independent recovery, optional Bitwarden CLI setup, and writable access to the real HA `/config` and `/addons` directories. That access is powerful: anyone able to run code in this add-on can modify your HA configuration.
 
 [![Add this repo](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A//github.com/laloraj/hermes-homeassistant)
 
-Run the [Hermes Agent](https://hermes-agent.nousresearch.com/) (NousResearch)
-with [hermes-webui](https://github.com/nesquena/hermes-webui) as a single
-Home Assistant Supervisor add-on.
+## Install and use
 
-## What you get
+1. Add `https://github.com/laloraj/hermes-homeassistant` in the HA Add-on Store repositories, then install **Hermes Assistant**.
+2. Set your timezone. Keep `enable_terminal` on for setup/recovery. The Supervisor token is used automatically; a manual HA token is optional.
+3. Start the add-on. The first Webapp build can take several minutes.
+4. Open the sidebar panel. When ready it signs you into the stock Hermes Webapp using a one-use ticket.
+5. For initial model/provider setup, open `<ingress URL>/recovery/` → **Setup / recovery terminal** and run `hermes setup`.
 
-- **Web UI panel** — Hermes web interface embedded in your HA sidebar
-  via Ingress
-- **Setup terminal** — ttyd-served terminal on port `7681` for running
-  `hermes setup` to authenticate any LLM provider (Anthropic, OpenAI,
-  Claude OAuth, …) interactively
-- **HA toolset** — Hermes can read state and call services on your HA
-  instance via a Long-Lived Access Token
+No LAN ports or extra UI passwords are configured. All browser access, including the terminal and logs, goes through HA admin Ingress.
 
-## Install
+## Recovery and upgrades
 
-1. **Add this repository** to Home Assistant:
-   - Settings → Add-ons → Add-on Store → ⋮ → Repositories
-   - Paste `https://github.com/laloraj/hermes-homeassistant`
-2. Refresh the store, install **Hermes Assistant**
-3. Open the **Configuration** tab and set at minimum:
-   - `webui_password` — Web UI login password
-   - `terminal_password` — protects the setup terminal
-   - `homeassistant_token` — paste a Long-Lived Access Token
-4. Start the add-on (first start installs the Hermes agent — takes 5–10 min)
-5. Open the panel from the sidebar, then visit the terminal at
-   `http://YOUR_HA_IP:7681` to run `hermes setup`
+- `<ingress URL>/recovery/`: static nginx landing page with terminal, logs and rollback instructions. Independent of the gateway, provider, Webapp build and ticket helper.
+- `hermes-safe-update.sh --now`: snapshot, update, build, restart, strict readiness check and automatic rollback on failure. Asking the agent to update uses this same script; it should be launched detached because restarting ends the agent chat.
+- `auto_update_agent: true`: update once on the next start, then reset this option to false.
+- `hermes-safe-update.sh --rollback`: restore the latest pre-update snapshot without requiring a working agent. Stop other CLI writers first.
+- `/ready` is strict gateway/Webapp readiness; `/health` adds a finite startup/update grace for the Supervisor watchdog. Enable Watchdog separately in the add-on settings if desired.
 
-Full configuration reference: see [hermes_assistant/DOCS.md](hermes_assistant/DOCS.md).
+Take an HA backup before an add-on update. Version 1.10.0 stops installing/serving classic WebUI but **does not delete old chats or `/data/hermes/webui-app`**. Those chats are not automatically imported into the Webapp.
 
-## Repo layout
+[Full configuration, data and recovery reference](hermes_assistant/DOCS.md) · [Changelog](hermes_assistant/CHANGELOG.md)
 
-```
-.
-├── repository.yaml                # HA add-on repo manifest
-└── hermes_assistant/              # the add-on
-    ├── config.yaml                # add-on manifest + options schema
-    ├── build.yaml                 # base image per arch
-    ├── Dockerfile                 # Debian + uv + ttyd + hermes-webui
-    ├── run.sh                     # entrypoint
-    ├── DOCS.md                    # add-on user docs (shown in HA)
-    ├── CHANGELOG.md
-    ├── icon.png                   # 128x128
-    └── logo.png                   # 250x100
-```
+## Development and release gates
 
-## Architecture support
+- Supported image architectures: `amd64`, `aarch64`.
+- `python3 -m unittest discover -s tests -v` (requires PyYAML; nginx + ttyd exercise real ingress tests when available).
+- `for script in hermes_assistant/*.sh; do bash -n "$script"; done`.
+- `.github/workflows/retag.yml` patches the upstream base with **all** wrapper files, removes only the unused image classic payload, and seeds Webapp-capable Hermes. Both architecture images must pass the disposable `tests/image_boot.py` fresh bootstrap/build/gateway/ticket smoke before either is published.
+- The full-build `hermes_assistant/Dockerfile` is kept consistent and also copies every helper. The runtime config helper explicitly depends on image `python3-yaml`, not a WebUI virtualenv.
 
-`amd64`, `aarch64` (HA OS on Intel NUC, Raspberry Pi 4/5, etc.).
-
-## License
-
-MIT
+License: MIT.

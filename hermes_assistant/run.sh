@@ -1,432 +1,168 @@
 #!/usr/bin/with-contenv bashio
-# Hermes Assistant — Home Assistant add-on entrypoint
-#
-# Process tree (PID 1 = s6-svscan from the HA base image's /init entrypoint;
-# this script is the s6 CMD, and the container halts when it returns — which
-# means when the exec'd nginx below returns, NOT when webui dies):
-#   nginx :8787      (exec'd; Ingress target, multiplexes:)
-#     ├── /          → Webapp front door at 127.0.0.1:9130 (signs in, redirects to the Webapp)
-#     ├── /webapp/   → Hermes Webapp at 127.0.0.1:9120 (served by the gateway)
-#     ├── /old/      → classic webui at 127.0.0.1:8788
-#     └── /terminal/ → ttyd  at 127.0.0.1:7681 (--base-path /terminal/)
-#   webui supervisor (bg subshell; respawns server.py on 127.0.0.1:8788)
-#   ttyd             (bg, bound 127.0.0.1:7681)
-#
-# First boot mirrors the agent + webui from /opt seeds into /data so user
-# updates ('hermes update', git pull) persist across image rebuilds.
+# Webapp-only add-on wrapper. Recovery/nginx/terminal start before Hermes work.
 set -e
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+export HERMES_HOME="${HERMES_HOME:-/data/hermes}"
+AGENT_DST="${HERMES_HOME}/agent-code"
+AGENT_SRC="${AGENT_SRC:-/opt/hermes-agent-code}"
+ADDON_BIN="${ADDON_BIN:-/usr/local/bin}"
+SAFE_UPDATE="${ADDON_BIN}/hermes-safe-update.sh"
+HERMES_LAUNCHER="${HERMES_BIN:-/usr/local/bin/hermes}"
+NGINX_CONFIG="${NGINX_CONFIG:-/etc/nginx/nginx.conf}"
+BOOTSTRAP_LOCK="${HERMES_HOME}/.bootstrap-lock"
+mkdir -p "${HERMES_HOME}/logs"
+rm -f "${HERMES_HOME}/.addon-ready" "${HERMES_HOME}/.webapp-building" "${HERMES_HOME}/.webapp-build-failed"
+touch "${HERMES_HOME}/.addon-started" "${BOOTSTRAP_LOCK}"
 
-WEBUI_PORT=8788
-TERMINAL_PORT=7681
-INGRESS_PORT=8787
-
-AGENT_DST=/data/hermes/agent-code
-AGENT_SRC=/opt/hermes-agent-code
-WEBUI_DST=/data/hermes/webui-app
-WEBUI_SRC=/opt/hermes-webui
-
-# ─── Read options ───────────────────────────────────────────────────────────
 HA_TOKEN_USER=$(bashio::config 'homeassistant_token')
 TZNAME=$(bashio::config 'timezone')
 ENABLE_TERMINAL=$(bashio::config 'enable_terminal')
 AUTO_UPDATE_AGENT=$(bashio::config 'auto_update_agent')
-AUTO_UPDATE_WEBUI=$(bashio::config 'auto_update_webui')
 AUTO_CONFIGURE_MCP=$(bashio::config 'auto_configure_mcp')
-
-# ─── Resolve HA token: user option > SUPERVISOR_TOKEN ───────────────────────
-if [ -n "${HA_TOKEN_USER}" ]; then
-    HA_TOKEN="${HA_TOKEN_USER}"
-    HASS_URL="http://homeassistant:8123"
-    bashio::log.info "Using user-supplied homeassistant_token (LLA)"
-elif [ -n "${SUPERVISOR_TOKEN:-}" ]; then
-    HA_TOKEN="${SUPERVISOR_TOKEN}"
-    HASS_URL="http://supervisor/core"
-    bashio::log.info "Using auto-injected SUPERVISOR_TOKEN (via Supervisor proxy)"
-else
-    HA_TOKEN=""
-    HASS_URL=""
-    bashio::log.warning "No HA token available — HA integration disabled"
-fi
-
-# ─── Timezone ────────────────────────────────────────────────────────────────
 export TZ="${TZNAME}"
-if [ -f "/usr/share/zoneinfo/${TZNAME}" ]; then
-    cp "/usr/share/zoneinfo/${TZNAME}" /etc/localtime
-    echo "${TZNAME}" > /etc/timezone
+
+# Supervisors terminate their own child; never signal any other HERMES_HOME.
+children=()
+shutdown() {
+    trap - EXIT TERM INT
+    for child in "${children[@]}"; do kill -TERM "${child}" 2>/dev/null || true; done
+    for child in "${children[@]}"; do wait "${child}" 2>/dev/null || true; done
+}
+trap shutdown EXIT
+trap 'exit 0' TERM INT
+supervise() (
+    set +e
+    child=""; napper=""
+    trap 'trap - TERM INT; kill -TERM ${child:-} ${napper:-} 2>/dev/null; exit 0' TERM INT
+    while true; do
+        "$@" & child=$!
+        wait "$child"; child=""
+        sleep 3 & napper=$!; wait "$napper"; napper=""
+    done
+)
+supervise /usr/bin/python3 "${ADDON_BIN}/webapp-ticket.py" >>"${HERMES_HOME}/logs/webapp-ticket.log" 2>&1 &
+children+=("$!")
+# nginx serves /recovery/ itself, even when this Python helper is unavailable.
+/usr/sbin/nginx -c "${NGINX_CONFIG}" &
+NGINX_PID=$!; children+=("$NGINX_PID")
+if bashio::var.true "${ENABLE_TERMINAL}"; then
+    supervise "${ADDON_BIN}/ttyd" --port 7681 --interface 127.0.0.1 --base-path /terminal \
+        --writable --check-origin bash -c '
+        export PATH="/usr/local/bin:$HERMES_HOME/agent-code/venv/bin:/opt/hermes-agent/node/bin:$PATH"
+        cd "$HERMES_HOME"
+        printf "Hermes recovery/setup terminal\nUpdate: hermes-safe-update.sh --now\nRollback: hermes-safe-update.sh --rollback\nLogs: logs/\nSetup: hermes setup\n"
+        exec bash' &
+    children+=("$!")
 fi
+bashio::log.info 'Recovery available at /recovery/; terminal and logs do not depend on Hermes.'
+# A failed bootstrap/config/integration must not tear down the recovery plane.
+set +e
 
-# ─── Persistent dirs ────────────────────────────────────────────────────────
-mkdir -p /data/hermes /data/hermes/webui
-
-# ─── .env (mode 600 — secrets, MANAGED + USER lines coexist) ────────────────
-# We ONLY rewrite the keys this script owns (HASS_TOKEN, HASS_URL,
-# CLAUDE_CODE_OAUTH_TOKEN). Anything the user added via `hermes setup`
-# (ANTHROPIC_API_KEY, OPENAI_API_KEY, custom provider configs, …) is
-# preserved across boots — a previous version truncated the file each
-# start and wiped those keys.
-ENV_FILE=/data/hermes/.env
-( umask 077 && touch "${ENV_FILE}" )
-MANAGED_KEYS=(HASS_TOKEN HASS_URL CLAUDE_CODE_OAUTH_TOKEN)
-for k in "${MANAGED_KEYS[@]}"; do
-    sed -i "/^${k}=/d" "${ENV_FILE}"
-done
-
+# Only these managed .env entries are refreshed. All user credentials remain.
+HA_TOKEN=""; HASS_URL=""
+if [ -n "${HA_TOKEN_USER}" ]; then
+    HA_TOKEN="${HA_TOKEN_USER}"; HASS_URL=http://homeassistant:8123
+elif [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    HA_TOKEN="${SUPERVISOR_TOKEN}"; HASS_URL=http://supervisor/core
+fi
+ENV_FILE="${HERMES_HOME}/.env"
+( umask 077; touch "${ENV_FILE}" )
 if [ -n "${HA_TOKEN}" ]; then
-    {
-        echo "HASS_TOKEN=${HA_TOKEN}"
-        echo "HASS_URL=${HASS_URL}"
-    } >> "${ENV_FILE}"
+    for key in HASS_TOKEN HASS_URL; do sed -i "/^${key}=/d" "${ENV_FILE}"; done
+    printf 'HASS_TOKEN=%s\nHASS_URL=%s\n' "${HA_TOKEN}" "${HASS_URL}" >>"${ENV_FILE}"
 fi
-
-if [ -f "/config/claude_credentials.json" ]; then
-    OAUTH_TOKEN=$(python3 -c "
-import json
-try:
-    d = json.load(open('/config/claude_credentials.json'))
-    print(d.get('claudeAiOauth', {}).get('accessToken', ''))
-except Exception:
-    pass
-" 2>/dev/null) || true
+export CLAUDE_CREDENTIALS_FILE="${CLAUDE_CREDENTIALS_FILE:-/config/claude_credentials.json}"
+if [ -f "${CLAUDE_CREDENTIALS_FILE}" ]; then
+    OAUTH_TOKEN=$(/usr/bin/python3 -c 'import json, os; print(json.load(open(os.environ["CLAUDE_CREDENTIALS_FILE"])).get("claudeAiOauth", {}).get("accessToken", ""))' 2>/dev/null) || true
     if [ -n "${OAUTH_TOKEN}" ]; then
-        echo "CLAUDE_CODE_OAUTH_TOKEN=${OAUTH_TOKEN}" >> "${ENV_FILE}"
-        bashio::log.info "Claude OAuth token loaded from /config"
+        sed -i '/^CLAUDE_CODE_OAUTH_TOKEN=/d' "${ENV_FILE}"
+        printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "${OAUTH_TOKEN}" >>"${ENV_FILE}"
     fi
-    # Also mirror the file to the path Hermes' webui polls
-    # (~/.claude/.credentials.json) so the "Login with Claude Code"
-    # button in the onboarding wizard detects existing credentials
-    # instead of waiting forever for a fresh in-container OAuth.
-    mkdir -p /root/.claude
-    cp /config/claude_credentials.json /root/.claude/.credentials.json
-    chmod 600 /root/.claude/.credentials.json
-    bashio::log.info "Mirrored credentials to ~/.claude/.credentials.json"
 fi
 chmod 600 "${ENV_FILE}"
 
-# ─── Hermes config.yaml (created once) ──────────────────────────────────────
-HERMES_CONFIG=/data/hermes/config.yaml
-if [ ! -f "${HERMES_CONFIG}" ]; then
-    bashio::log.info "Creating initial Hermes config.yaml"
-    {
-        echo "platforms:"
-        echo "  homeassistant:"
-        echo "    enabled: true"
-        echo "    extra:"
-        echo "      cooldown_seconds: 60"
-        if bashio::config.has_value 'watch_entities'; then
-            echo "      watch_entities:"
-            for entity in $(bashio::config 'watch_entities'); do
-                echo "        - ${entity}"
-            done
-        fi
-    } > "${HERMES_CONFIG}"
-fi
-
-# ─── Auto-configure HA Core's MCP Server as a Hermes MCP source ─────────────
-# Uses HA's Streamable HTTP endpoint /api/mcp (the preferred transport per
-# HA core source; /mcp_server/sse still works but is the legacy path).
-# Omitting `transport:` lets Hermes default to streamable_http when `url`
-# is set (see hermes-agent/tools/mcp_tool.py).
-#
-# Idempotent: rewrites the `homeassistant` entry under mcp_servers every
-# boot so the SUPERVISOR_TOKEN stays fresh (rotates between sessions).
-# Other mcp_servers entries the user has added by hand are preserved.
-if bashio::var.true "${AUTO_CONFIGURE_MCP}" && [ -n "${HA_TOKEN}" ]; then
-    bashio::log.info "auto_configure_mcp=true — wiring HA MCP Server into config.yaml"
-    /opt/hermes-webui/.venv/bin/python - "${HERMES_CONFIG}" "${HASS_URL}" "${HA_TOKEN}" <<'PY'
-import sys, yaml
-path, hass_url, hass_token = sys.argv[1:4]
-try:
-    with open(path) as f:
-        cfg = yaml.safe_load(f) or {}
-except FileNotFoundError:
-    cfg = {}
-cfg.setdefault("mcp_servers", {})
-cfg["mcp_servers"]["homeassistant"] = {
-    "url": f"{hass_url.rstrip('/')}/api/mcp",
-    "headers": {"Authorization": f"Bearer {hass_token}"},
-}
-with open(path, "w") as f:
-    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-print(f"[mcp] wrote homeassistant → {hass_url}/api/mcp (streamable_http)")
-PY
-    chmod 600 "${HERMES_CONFIG}"
-fi
-
-# ─── Mirror image seed to /data (first boot only) ───────────────────────────
-BOOTSTRAP_LOCK=/data/hermes/.bootstrap-lock
-
-mirror_with_shebang_fix() {
-    local src=$1 dst=$2
-    bashio::log.info "Mirroring ${src} → ${dst} (this may take ~30s on slow storage)"
-    cp -a "${src}" "${dst}"
-    for venv_bin in "${dst}/venv/bin" "${dst}/.venv/bin"; do
-        if [ -d "${venv_bin}" ]; then
-            find "${venv_bin}" -type f -exec sed -i \
-                "s|${src}|${dst}|g" {} \; 2>/dev/null || true
-        fi
-    done
-    # Reset working tree so webui's in-app "Update" banner
-    # (git stash → pull → stash pop) starts from a clean slate.
-    if [ -d "${dst}/.git" ]; then
-        git -C "${dst}" reset --hard HEAD --quiet 2>/dev/null || true
-        git -C "${dst}" clean -fd --quiet 2>/dev/null || true
-    fi
-    bashio::log.info "Mirror of $(basename ${dst}) complete ($(du -sh ${dst} | cut -f1))"
-}
-
-touch "${BOOTSTRAP_LOCK}"
+# Keep all existing /data, including retired classic chat history and code.
 if [ ! -d "${AGENT_DST}" ] && [ -d "${AGENT_SRC}" ]; then
-    mirror_with_shebang_fix "${AGENT_SRC}" "${AGENT_DST}"
-fi
-if [ ! -d "${WEBUI_DST}" ] && [ -d "${WEBUI_SRC}" ]; then
-    mirror_with_shebang_fix "${WEBUI_SRC}" "${WEBUI_DST}"
-fi
-rm -f "${BOOTSTRAP_LOCK}"
-
-[ -d "${AGENT_DST}/venv" ] && AGENT_DIR="${AGENT_DST}" || AGENT_DIR="${AGENT_SRC}"
-[ -d "${WEBUI_DST}/.venv" ] && WEBUI_DIR="${WEBUI_DST}" || WEBUI_DIR="${WEBUI_SRC}"
-bashio::log.info "Agent dir: ${AGENT_DIR}"
-bashio::log.info "WebUI dir: ${WEBUI_DIR}"
-
-# ─── Optional agent auto-update (safe: snapshot, update, verify, auto-rollback) ──
-# Personal data (memories, wiki, skills, scripts, config, databases) lives in
-# /data/hermes, outside the agent git checkout, so an update never touches it;
-# hermes-safe-update.sh also keeps a dated snapshot copy and restores it on failure.
-SAFE_UPDATE=/usr/local/bin/hermes-safe-update.sh
-export AGENT_DIR HERMES_HOME=/data/hermes
-rm -f /data/hermes/.update-running   # stale flag from an update the restart interrupted
-if bashio::var.true "${AUTO_UPDATE_AGENT}" && [ -d "${AGENT_DST}/.git" ]; then
-    bashio::log.info "auto_update_agent=true — running safe update (one-shot)"
-    "${SAFE_UPDATE}" --boot 2>&1 | sed 's/^/  [safe-update] /' || \
-        bashio::log.warning "safe update did not finish — continuing on the current version"
-    # One-shot: switch the option off again so the next restart does not retry.
-    "${SAFE_UPDATE}" --reset-toggle 2>&1 | sed 's/^/  [safe-update] /' || true
-fi
-
-# Every bare `hermes` must run the updated code, not the image's baked-in tree (see hermes-safe-update.sh).
-AGENT_DIR="${AGENT_DIR}" HERMES_HOME=/data/hermes "${SAFE_UPDATE}" --fix-launcher 2>&1 | sed 's/^/  [safe-update] /' || true
-
-if bashio::var.true "${AUTO_UPDATE_WEBUI}" && [ -d "${WEBUI_DST}/.git" ]; then
-    bashio::log.info "auto_update_webui=true — git pull hermes-webui (auto-resetting any local mods)"
-    (
-        cd "${WEBUI_DST}"
-        # Always reset so a stale stash or stray edit can't block the pull.
-        # The addon never persists tracked-file edits, so there is nothing
-        # to preserve here.
-        git stash drop --quiet 2>/dev/null || true
-        git reset --hard HEAD --quiet 2>/dev/null || true
-        git clean -fd --quiet 2>/dev/null || true
-        git pull --ff-only 2>&1 | sed 's/^/  [webui pull] /'
-    ) || bashio::log.warning "webui git pull failed — continuing"
-fi
-
-# ─── Bitwarden CLI (optional; set up from add-on options, never fatal) ──────
-BW_OPT_SERVER=$(bashio::config 'bitwarden_server') BW_OPT_EMAIL=$(bashio::config 'bitwarden_email') \
-BW_OPT_PASSWORD=$(bashio::config 'bitwarden_master_password') BW_OPT_CLIENT_ID=$(bashio::config 'bitwarden_client_id') \
-BW_OPT_CLIENT_SECRET=$(bashio::config 'bitwarden_client_secret') \
-    /usr/local/bin/bw-setup.sh 2>&1 | sed 's/^/  /' || true
-
-# ─── Export envs for hermes-webui ───────────────────────────────────────────
-export HERMES_HOME=/data/hermes
-export HERMES_INSTALL_DIR="${AGENT_DIR}"
-export HERMES_WEBUI_AGENT_DIR="${AGENT_DIR}"
-export HERMES_WEBUI_STATE_DIR=/data/hermes/webui
-# Bind 0.0.0.0 inside the container. webui prints/embeds "$HOST:$PORT" in
-# the served HTML; with HOST=127.0.0.1 the browser would try to reach
-# the webui's own loopback (which only exists inside the container) and
-# get "refused to connect". 0.0.0.0 in those self-references causes the
-# webui to fall back to window.location, which works through Ingress.
-# nginx still proxies to 127.0.0.1:${WEBUI_PORT} because 0.0.0.0 bind
-# accepts loopback connections.
-export HERMES_WEBUI_HOST=0.0.0.0
-export HERMES_WEBUI_PORT="${WEBUI_PORT}"
-# Use the AGENT venv (not the webui venv) — it has hermes-agent
-# installed editable plus every transitive dep webui needs at import
-# time (dotenv, anthropic SDK, …). The webui-only venv was minimal
-# (pyyaml + cryptography), which caused 'AIAgent not available' /
-# ModuleNotFoundError: No module named 'dotenv' the moment the user
-# tried to chat.
-export HERMES_WEBUI_PYTHON="${AGENT_DIR}/venv/bin/python"
-export HERMES_CONFIG_PATH=/data/hermes/config.yaml
-export HERMES_WEBUI_PRESERVE_ENV=1
-
-# ─── Start webui (background, loopback only — nginx fronts it) ──────────────
-# Wrapped in a respawn supervisor. webui restarts itself on self-update and
-# on some in-app actions; when it does so by exiting (rather than execv'ing
-# in place) nothing used to bring it back, and the add-on stayed "started"
-# forever with a dead UI because nginx — not webui — is the process the
-# container lifecycle is bound to.
-#
-# `set +e` is NOT optional: the bashio shebang wrapper enables errexit,
-# errtrace, nounset, pipefail and inherit_errexit before this script is
-# sourced, and line 13 sets -e again. A while-loop *body* is not an
-# errexit-exempt context, so without it the supervisor would die on
-# server.py's first non-zero exit and never respawn.
-bashio::log.info "Starting Hermes Web UI bg on 0.0.0.0:${WEBUI_PORT} (nginx fronts via loopback)"
-cd "${WEBUI_DIR}"
-(
-    set +e
-    child=""
-    napper=""
-
-    # Don't resurrect webui while the add-on is shutting down. webui installs
-    # no SIGTERM handler, so it dies with status 143 and would otherwise look
-    # like a crash worth respawning.
-    _shutdown() {
-        trap - TERM
-        [ -n "${napper}" ] && kill -TERM "${napper}" 2>/dev/null
-        [ -n "${child}" ]  && kill -TERM "${child}"  2>/dev/null
-        exit 0
-    }
-    trap _shutdown TERM
-
-    # Sleep in the background and wait on it, so _shutdown fires during a
-    # backoff instead of being deferred until the sleep returns.
-    nap() { sleep "$1" & napper=$!; wait "${napper}"; napper=""; }
-
-    fails=0
-    delay=5
-    while true; do
-        started=$(date +%s)
-        "${HERMES_WEBUI_PYTHON}" "${WEBUI_DIR}/server.py" &
-        child=$!
-        bashio::log.info "webui server.py PID=${child}"
-        wait "${child}"
-        rc=$?
-        child=""
-        ran=$(( $(date +%s) - started ))
-
-        # 30s, not 10s: a crash on the first chat request lands well past 10s
-        # and would otherwise never trip the backoff.
-        if [ "${ran}" -lt 30 ]; then
-            fails=$(( fails + 1 ))
-        else
-            fails=0
-            delay=5
-        fi
-
-        if [ "${fails}" -ge 5 ]; then
-            bashio::log.error "webui exited ${fails}x within 30s (rc=${rc}) — backing off ${delay}s"
-            nap "${delay}"
-            [ "${delay}" -lt 300 ] && delay=$(( delay * 2 ))
-        else
-            bashio::log.warning "webui exited after ${ran}s (rc=${rc}) — respawning in 2s"
-            nap 2
-        fi
+    bashio::log.info 'Mirroring the image agent seed to persistent storage'
+    cp -a "${AGENT_SRC}" "${AGENT_DST}"
+    for bin in "${AGENT_DST}/venv/bin" "${AGENT_DST}/.venv/bin"; do
+        [ ! -d "$bin" ] || find "$bin" -type f -exec sed -i "s|${AGENT_SRC}|${AGENT_DST}|g" {} \; 2>/dev/null || true
     done
-) &
-WEBUI_SUP_PID=$!
-bashio::log.info "webui respawn supervisor PID=${WEBUI_SUP_PID}"
+fi
+AGENT_DIR="${AGENT_DST}"
+export AGENT_DIR
+export PATH="/usr/local/bin:${AGENT_DIR}/venv/bin:/opt/hermes-agent/node/bin:${PATH}"
+RUNTIME_OK=false
+if [ -f "${HERMES_HOME}/.update-running" ]; then
+    bashio::log.warning 'Interrupted update detected; gateway held. Use recovery terminal: hermes-safe-update.sh --rollback'
+elif /usr/bin/python3 "${ADDON_BIN}/addon_runtime.py" ensure --home "${HERMES_HOME}" --source "${AGENT_DIR}" >>"${HERMES_HOME}/logs/bootstrap.log" 2>&1; then
+    RUNTIME_OK=true
+    rm -f "${BOOTSTRAP_LOCK}"
+else
+    bashio::log.warning 'Runtime reconstruction failed; gateway held. See recovery bootstrap log.'
+fi
+if [ -x /opt/hermes-agent/node/bin/node ] && [ ! -e "${HERMES_HOME}/node" ]; then
+    ln -s /opt/hermes-agent/node "${HERMES_HOME}/node"
+fi
+if [ "$RUNTIME_OK" = true ] && bashio::var.true "${AUTO_UPDATE_AGENT}" && [ -d "${AGENT_DST}/.git" ]; then
+    "${SAFE_UPDATE}" --boot || bashio::log.warning 'Safe update failed; recovery remains available'
+    "${SAFE_UPDATE}" --reset-toggle || true
+fi
+"${SAFE_UPDATE}" --fix-launcher || true
 
-# ─── Start messaging gateway (background, respawned) ────────────────────────
-# Hosts the API server (port 8642) plus HA/WhatsApp platforms. Nothing else
-# starts it, so without this it stays down after every add-on restart.
-(
-    set +e
-    while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
-    export HERMES_HOME=/data/hermes
-    export PATH="/usr/local/bin:${AGENT_DIR}/venv/bin:${PATH}"
-    # Hermes looks for its managed Node at $HERMES_HOME/node/bin before PATH.
-    # Point it at the image's Node so the WhatsApp bridge works without a
-    # second Node install (idempotent; refreshed every boot).
-    if [ -x /opt/hermes-agent/node/bin/node ] && [ ! -e /data/hermes/node/bin/node ]; then
-        rm -rf /data/hermes/node 2>/dev/null || true
-        ln -sfn /opt/hermes-agent/node /data/hermes/node
-    fi
-    # The browser Webapp is served by the gateway itself; turn it on (idempotent, only when this Hermes has it).
-    HERMES_LAUNCHER=/usr/local/bin/hermes   # the updater-maintained launcher, not venv/bin/hermes
-    if "${HERMES_LAUNCHER}" webapp --help >/dev/null 2>&1; then
-        "${HERMES_LAUNCHER}" config set webapp.enabled true >> /data/hermes/logs/webapp-build.log 2>&1 || true
-    else
-        echo "$(date '+%F %T') Webapp not available in this Hermes version; front page falls back to /old/" >> /data/hermes/logs/webapp-build.log
-    fi
-    trap 'kill -TERM "${gw}" 2>/dev/null; exit 0' TERM
-    while true; do
-        # hermes-safe-update.sh holds the gateway down while it swaps code or databases.
-        while [ -f /data/hermes/.update-running ]; do sleep 2; done
-        cd /data/hermes
-        "${HERMES_LAUNCHER}" gateway run --no-supervise >> /data/hermes/logs/gateway-addon.log 2>&1 &
-        gw=$!
-        wait "${gw}"
-        sleep 10
-    done
-) &
-bashio::log.info "gateway respawn supervisor PID=$!"
+HERMES_CONFIG="${HERMES_HOME}/config.yaml"
+if [ ! -f "${HERMES_CONFIG}" ]; then
+    # Entity IDs are validated by the add-on schema; existing configs untouched.
+    {
+        echo 'platforms:'
+        echo '  homeassistant:'
+        [ -n "$HA_TOKEN" ] && echo '    enabled: true' || echo '    enabled: false'
+        echo '    extra:'
+        echo '      cooldown_seconds: 60'
+        echo '      watch_entities:'
+        for entity in $(bashio::config 'watch_entities'); do printf '        - %s\n' "$entity"; done
+    } >"${HERMES_CONFIG}"
+fi
+mcp_args=()
+bashio::var.true "${AUTO_CONFIGURE_MCP}" && mcp_args+=(--mcp)
+HASS_TOKEN="${HA_TOKEN}" HASS_URL="${HASS_URL}" /usr/bin/python3 "${ADDON_BIN}/addon_config.py" \
+    "${HERMES_CONFIG}" "${mcp_args[@]}" || bashio::log.warning 'Config setup failed; see recovery terminal'
 
-# ─── Webapp bundle + front door ─────────────────────────────────────────────
-# `hermes webapp --build-only` builds the browser bundle when it is missing or out of date (a few minutes the
-# first time, near-instant afterwards). The flag file lets the front door show a "building" page meanwhile.
+# Optional password-manager integration stays separate and cannot block startup.
 (
-    set +e
-    while [ -f ${BOOTSTRAP_LOCK} ]; do sleep 2; done
-    export HERMES_HOME=/data/hermes
-    export PATH="/usr/local/bin:${AGENT_DIR}/venv/bin:${PATH}"
-    HERMES_LAUNCHER=/usr/local/bin/hermes
-    if "${HERMES_LAUNCHER}" webapp --help >/dev/null 2>&1; then
-        touch /data/hermes/.webapp-building
-        "${HERMES_LAUNCHER}" webapp --build-only >> /data/hermes/logs/webapp-build.log 2>&1 \
-            || bashio::log.warning "Webapp build failed; the classic WebUI at /old/ still works"
-        rm -f /data/hermes/.webapp-building
+    BW_OPT_SERVER=$(bashio::config 'bitwarden_server') BW_OPT_EMAIL=$(bashio::config 'bitwarden_email') \
+    BW_OPT_PASSWORD=$(bashio::config 'bitwarden_master_password') BW_OPT_CLIENT_ID=$(bashio::config 'bitwarden_client_id') \
+    BW_OPT_CLIENT_SECRET=$(bashio::config 'bitwarden_client_secret') \
+        timeout 120 "${ADDON_BIN}/bw-setup.sh" || bashio::log.warning 'Optional Bitwarden setup unavailable; continuing'
+) &
+children+=("$!")
+
+# Build once per boot; gateway can serve it as soon as the bundle appears.
+(
+    touch "${HERMES_HOME}/.webapp-building"
+    trap 'rm -f "${HERMES_HOME}/.webapp-building"' EXIT
+    if [ "$RUNTIME_OK" != true ]; then
+        touch "${HERMES_HOME}/.webapp-build-failed"
+    elif ! "${HERMES_LAUNCHER}" webapp --build-only >>"${HERMES_HOME}/logs/webapp-build.log" 2>&1; then
+        touch "${HERMES_HOME}/.webapp-build-failed"
+        bashio::log.warning 'Webapp build failed; open /recovery/ for logs and rollback'
     fi
 ) &
-
-# Front door: HA Ingress is the gate, so it mints the one-use Webapp sign-in link and redirects (respawned).
+children+=("$!")
 (
     set +e
-    export HERMES_HOME=/data/hermes
+    gw=""; napper=""
+    trap 'trap - TERM INT; kill -TERM ${gw:-} ${napper:-} 2>/dev/null; exit 0' TERM INT
     while true; do
-        python3 /usr/local/bin/webapp-ticket.py >> /data/hermes/logs/webapp-ticket.log 2>&1
-        sleep 3
+        while [ -f "${HERMES_HOME}/.update-running" ] || [ -f "${BOOTSTRAP_LOCK}" ]; do sleep 2 & napper=$!; wait "$napper"; done
+        cd "${HERMES_HOME}"
+        "${HERMES_LAUNCHER}" gateway run --no-supervise >>"${HERMES_HOME}/logs/gateway-addon.log" 2>&1 &
+        gw=$!; wait "$gw"; gw=""
+        sleep 10 & napper=$!; wait "$napper"; napper=""
     done
 ) &
-bashio::log.info "Webapp front door started (127.0.0.1:9130)"
-# A pending update is verified once the gateway is up; a failed health check rolls back.
-( sleep 20; "${SAFE_UPDATE}" --verify >/dev/null 2>&1 ) &   # the script logs to safe-update.log itself
-
-# ─── Start ttyd (background, loopback only — nginx fronts it) ───────────────
-if bashio::var.true "${ENABLE_TERMINAL}"; then
-    # No --credential: ttyd binds 127.0.0.1 and is reachable only through
-    # HA Ingress (panel_admin: true). The HA admin who can open the panel
-    # is already trusted; a second password prompt would just slow them
-    # down to no security benefit.
-    bashio::log.info "Starting ttyd bg on 127.0.0.1:${TERMINAL_PORT} (/terminal/, no auth — HA Ingress gates access)"
-    /usr/local/bin/ttyd \
-        --port "${TERMINAL_PORT}" \
-        --interface 127.0.0.1 \
-        --base-path /terminal \
-        --writable \
-        --check-origin \
-        bash -l -c "
-            while [ -f ${BOOTSTRAP_LOCK} ]; do
-                echo 'Waiting for Hermes bootstrap…'; sleep 2;
-            done
-            export HERMES_HOME=/data/hermes
-            export HERMES_INSTALL_DIR=${AGENT_DIR}
-            export PATH=\"/usr/local/bin:${AGENT_DIR}/venv/bin:${WEBUI_DIR}/.venv/bin:/opt/hermes-agent/node/bin:\${PATH}\"
-            cd \${HERMES_HOME}
-            echo ''
-            echo '=================================================='
-            echo '  Hermes Setup Terminal'
-            echo '=================================================='
-            echo ''
-            echo '  Configure any LLM provider:'
-            echo '    hermes setup     interactive wizard'
-            echo '    hermes model     pick / switch provider+model'
-            echo '    hermes update    pull latest agent'
-            echo '    hermes --help    all commands'
-            echo ''
-            echo '  Start with `hermes setup` — it walks through every'
-            echo '  supported provider (Anthropic, OpenAI, Google,'
-            echo '  OpenRouter, Copilot, local models, …) and saves'
-            echo '  credentials to /data/hermes/.env.'
-            echo ''
-            echo '=================================================='
-            exec bash
-        " &
-    TTYD_PID=$!
-    bashio::log.info "ttyd PID=${TTYD_PID}"
-fi
-
-# ─── nginx (foreground, PID 1) ──────────────────────────────────────────────
-bashio::log.info "Starting nginx :${INGRESS_PORT} multiplex (/ -> Webapp, /old/, /terminal/)"
-exec /usr/sbin/nginx -c /etc/nginx/nginx.conf
+children+=("$!")
+( "${SAFE_UPDATE}" --verify >>"${HERMES_HOME}/logs/safe-update-verify.log" 2>&1 ) &
+children+=("$!")
+# Bind container lifetime to nginx while retaining cleanup traps.
+wait "${NGINX_PID}"

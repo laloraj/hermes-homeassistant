@@ -1,7 +1,7 @@
 name: "Hermes Assistant (fork: +HA config/addons access)"
-version: "1.9.1"
+version: "1.10.0"
 slug: hermes_assistant
-description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with Web UI and setup terminal. This fork additionally maps the real HA /config and /addons folders into the container."
+description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with the gateway Webapp and independent recovery terminal. This fork additionally maps the real HA /config and /addons folders into the container."
 url: https://github.com/laloraj/hermes-homeassistant
 
 arch:
@@ -18,7 +18,7 @@ startup: services
 boot: auto
 init: false
 
-# HA Ingress: embeds the webui into the HA sidebar.
+# HA Ingress: embeds the gateway Webapp into the HA sidebar.
 ingress: true
 ingress_port: 8787
 panel_title: Hermes Agent
@@ -30,21 +30,9 @@ homeassistant_api: true
 hassio_api: true
 hassio_role: manager
 
-# Auto-restart by HA if the WebUI health endpoint stops responding.
-#
-# Must be http://, not tcp://. A tcp:// probe resolves to a bare 0.5s socket
-# connect (supervisor/utils check_port), and port 8787 is nginx — which stays
-# up whether or not the webui behind it on 8788 is alive, so the probe passed
-# forever while the UI was dead. http:// traverses nginx to the webui and
-# counts any status >= 300 as a failure (supervisor/apps/app.py
-# watchdog_application), so a crashed webui shows up as nginx's 502. The probe
-# also has a 10s total timeout (WATCHDOG_TIMEOUT), which is the only thing that
-# catches a webui that hangs instead of exiting — run.sh's respawn supervisor
-# cannot see that case, because the process never dies.
-#
-# NOTE: this key only supplies the probe target. The watchdog is armed by a
-# per-installation toggle that defaults to OFF — turn it on at
-# Settings -> Add-ons -> Hermes Assistant -> Watchdog.
+# Gateway/Webapp HTTP + bundle readiness, not nginx liveness. A finite 15-minute
+# initial boot/update grace permits first builds. Enable the separate Watchdog
+# switch in Settings -> Add-ons -> Hermes Assistant; it defaults off.
 watchdog: "http://[HOST]:[PORT:8787]/health"
 
 # Persistent state lives in /data/hermes (managed by Supervisor).
@@ -56,7 +44,7 @@ map:
   - addons:rw
 
 # Skip regenerable artifacts from HA backups (~400-600MB saved).
-# Agent + webui code mirror lives in /data so updates persist, but the
+# Agent code mirror lives in /data so updates persist, but the
 # venv directories can be rebuilt from the image seed if lost.
 backup_exclude:
   - "hermes/agent-code/venv/*"
@@ -67,7 +55,7 @@ backup_exclude:
   - "hermes/webui/cache/*"
   - "hermes/.cache/*"
 
-# Webui + setup terminal both served via HA Ingress (multiplexed through
+# Webapp + setup terminal both served via HA Ingress (multiplexed through
 # nginx inside the container). Neither is exposed to the LAN. The optional
 # LAN port mapping is removed — terminal is reachable only via the Ingress
 # panel at <ingress_url>/terminal/.
@@ -82,10 +70,6 @@ options:
   # check, automatic rollback), then this switches itself back off. Your
   # memory, wiki, scripts and settings are kept. Or ask the agent to update.
   auto_update_agent: false
-
-  # When true, `git pull` hermes-webui on every container start.
-  # Pinned to the same branch the image was built from.
-  auto_update_webui: false
 
   # ── INTEGRATIONS ────────────────────────────────────────────────────────
   # When true, register HA Core's MCP Server as a Hermes MCP source
@@ -118,7 +102,6 @@ schema:
   timezone: str
   enable_terminal: bool
   auto_update_agent: bool
-  auto_update_webui: bool
   auto_configure_mcp: bool
   homeassistant_token: password?
   bitwarden_server: str?
