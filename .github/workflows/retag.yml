@@ -72,7 +72,10 @@ jobs:
               ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION} /tests/image_boot.py
           done
           # Neither architecture is published until BOTH fresh-boot smokes pass.
-          for arch in amd64 aarch64; do
-            docker push ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION}
-            docker push ghcr.io/laloraj/${arch}-hermes-assistant:latest
-          done
+          # Manual branch runs certify images without publishing release tags.
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            for arch in amd64 aarch64; do
+              docker push ghcr.io/laloraj/${arch}-hermes-assistant:${VERSION}
+              docker push ghcr.io/laloraj/${arch}-hermes-assistant:latest
+            done
+          fi
