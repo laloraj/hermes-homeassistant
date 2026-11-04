@@ -11,6 +11,7 @@
   Home Assistant and talks to it over the private add-on network. The CLI refuses plain `http://` servers, so the
   add-on runs a small loopback-only TLS front for that case. For any other server, enter a host name or URL
   (`https://` with a valid certificate) in `bitwarden_server`.
+- Each new option has help text on the Configuration tab (server and API key are optional).
 - Two-step login: add `bitwarden_client_id` / `bitwarden_client_secret` (personal API key). The master password is
   still needed to unlock.
 - The master password is stored in a file readable only by root (`/data/hermes/secrets/bw_master`), like the other

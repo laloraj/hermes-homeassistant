@@ -1,0 +1,37 @@
+configuration:
+  timezone:
+    name: Timezone
+    description: Your time zone, for example America/Phoenix.
+  enable_terminal:
+    name: Enable setup terminal
+    description: Show the terminal tab inside the add-on panel.
+  auto_update_agent:
+    name: Update Hermes on next start
+    description: Updates Hermes once on the next start (with a snapshot and automatic rollback), then switches itself off.
+  auto_update_webui:
+    name: Update the classic WebUI on every start
+    description: Leave off unless you know you need it.
+  auto_configure_mcp:
+    name: Connect Home Assistant MCP
+    description: Registers the Home Assistant MCP Server with Hermes on every start.
+  homeassistant_token:
+    name: Home Assistant token (optional)
+    description: Your own long-lived access token. Leave empty to use the automatic add-on token.
+  watch_entities:
+    name: Entities to watch (optional)
+    description: Home Assistant entities Hermes should watch. Empty means none.
+  bitwarden_email:
+    name: Bitwarden e-mail (optional)
+    description: The e-mail of your Bitwarden account. Together with the master password this turns Bitwarden on, so Hermes tasks can use the logins saved in your vault.
+  bitwarden_master_password:
+    name: Bitwarden master password (optional)
+    description: Stored in a file only the add-on can read, so tasks can unlock the vault without asking you. Leave empty to keep Bitwarden off.
+  bitwarden_server:
+    name: Bitwarden server (optional)
+    description: Leave empty and the add-on automatically finds the Vaultwarden add-on on this Home Assistant and connects to it. Only fill this in for a different server - a host name or https:// address with a valid certificate.
+  bitwarden_client_id:
+    name: Bitwarden API key client ID (optional)
+    description: Only needed if your Bitwarden account uses two-step login. Leave empty otherwise. Find it in the web vault under Settings, Security, Keys, View API key.
+  bitwarden_client_secret:
+    name: Bitwarden API key client secret (optional)
+    description: Goes with the client ID above and is also optional. Leave empty if your account does not use two-step login. The master password is still required.
