@@ -1,5 +1,5 @@
 name: "Hermes Assistant (fork: +HA config/addons access)"
-version: "1.8.2"
+version: "1.9.0"
 slug: hermes_assistant
 description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with Web UI and setup terminal. This fork additionally maps the real HA /config and /addons folders into the container."
 url: https://github.com/laloraj/hermes-homeassistant
@@ -99,6 +99,18 @@ options:
   # Access Token. Leave empty to use the supervisor proxy (recommended).
   homeassistant_token: ""
 
+  # ── BITWARDEN (password manager for logins Hermes needs) ───────────────
+  # Fill in email + master password and the add-on sets up the Bitwarden CLI by
+  # itself on every start. Server: leave empty to auto-use the Vaultwarden
+  # add-on on this Home Assistant; otherwise enter a host name or URL.
+  bitwarden_server: ""
+  bitwarden_email: ""
+  bitwarden_master_password: ""
+  # Only if your account uses two-step login: personal API key (web vault ->
+  # Settings -> Security -> Keys). Still needs the master password above.
+  bitwarden_client_id: ""
+  bitwarden_client_secret: ""
+
   # Entities for Hermes to watch. Empty = none.
   watch_entities: []
 
@@ -109,5 +121,10 @@ schema:
   auto_update_webui: bool
   auto_configure_mcp: bool
   homeassistant_token: password?
+  bitwarden_server: str?
+  bitwarden_email: str?
+  bitwarden_master_password: password?
+  bitwarden_client_id: str?
+  bitwarden_client_secret: password?
   watch_entities:
     - str?

@@ -210,6 +210,12 @@ RUN printf '%s\n' \
 
 # Add-on entrypoint + nginx multiplex config
 COPY run.sh /run.sh
+COPY bw-setup.sh /usr/local/bin/bw-setup.sh
+COPY bw-shim.sh /usr/local/bin/bw-shim.sh
+COPY bw-wrapper.sh /usr/local/bin/bw
+COPY bw-session.sh /usr/local/bin/bw-session
+RUN env PATH=/opt/hermes-agent/node/bin:/usr/local/bin:/usr/bin:/bin npm install --prefix /opt/bw @bitwarden/cli \
+    && chmod +x /usr/local/bin/bw-shim.sh /usr/local/bin/bw-setup.sh /usr/local/bin/bw /usr/local/bin/bw-session
 COPY nginx.conf /etc/nginx/nginx.conf
 RUN chmod +x /run.sh \
     && mkdir -p /run/nginx /var/log/nginx

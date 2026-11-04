@@ -89,6 +89,10 @@ the add-on uses the Supervisor proxy automatically (via `homeassistant_api`).
 | `auto_update_webui` | no | `true` → `git pull` Web UI every container start |
 | `auto_configure_mcp` | no | `true` (default) → wire HA Core's MCP Server into Hermes config every boot. Requires the "MCP Server" integration in HA |
 | `homeassistant_token` | no | Override the auto SUPERVISOR_TOKEN with your own LLA |
+| `bitwarden_server` | no | Host name or `https://` URL of your Bitwarden/Vaultwarden server. Empty = auto-use the Vaultwarden add-on on this HA |
+| `bitwarden_email` | no | Bitwarden account e-mail (with the master password, turns Bitwarden on) |
+| `bitwarden_master_password` | no | Master password; stored in `/data/hermes/secrets/bw_master` (root only) so jobs can unlock unattended |
+| `bitwarden_client_id` / `bitwarden_client_secret` | no | Personal API key, only if the account uses two-step login |
 | `watch_entities` | no | List of entity IDs Hermes should watch |
 
 All LLM provider credentials (Anthropic, OpenAI, Claude Max OAuth, …)

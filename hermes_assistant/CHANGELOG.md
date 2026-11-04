@@ -1,5 +1,22 @@
 # Changelog
 
+## fork (laloraj) 1.9.0 — 2026-11-04
+
+- **New: Bitwarden password manager, set up by the add-on itself.** The add-on now ships the Bitwarden CLI (`bw`).
+  Fill in `bitwarden_email` and `bitwarden_master_password` in the add-on Configuration tab and, on every start, it
+  points the CLI at your vault, logs in and unlocks it. Hermes jobs then read the logins that already exist in your
+  vault (`export BW_SESSION=$(bw-session); bw get password <item>`), so recurring tasks need no help from you. A site
+  that is not in the vault yet needs one entry from you; it is saved to the vault for every later run.
+- **No DNS or AdGuard dependency.** Leave `bitwarden_server` empty and the add-on finds the Vaultwarden add-on on this
+  Home Assistant and talks to it over the private add-on network. The CLI refuses plain `http://` servers, so the
+  add-on runs a small loopback-only TLS front for that case. For any other server, enter a host name or URL
+  (`https://` with a valid certificate) in `bitwarden_server`.
+- Two-step login: add `bitwarden_client_id` / `bitwarden_client_secret` (personal API key). The master password is
+  still needed to unlock.
+- The master password is stored in a file readable only by root (`/data/hermes/secrets/bw_master`), like the other
+  secrets, and is never written to the log. Leave the options empty and Bitwarden stays off.
+- This does not change the browser extension, which still needs an HTTPS address of its own.
+
 ## fork (laloraj) 1.8.2 — 2026-11-03
 
 - **Fix: the add-on kept running the OLD Hermes code after an update, and the Webapp never started.** The gateway

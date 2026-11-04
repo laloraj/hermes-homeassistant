@@ -220,6 +220,12 @@ if bashio::var.true "${AUTO_UPDATE_WEBUI}" && [ -d "${WEBUI_DST}/.git" ]; then
     ) || bashio::log.warning "webui git pull failed — continuing"
 fi
 
+# ─── Bitwarden CLI (optional; set up from add-on options, never fatal) ──────
+BW_OPT_SERVER=$(bashio::config 'bitwarden_server') BW_OPT_EMAIL=$(bashio::config 'bitwarden_email') \
+BW_OPT_PASSWORD=$(bashio::config 'bitwarden_master_password') BW_OPT_CLIENT_ID=$(bashio::config 'bitwarden_client_id') \
+BW_OPT_CLIENT_SECRET=$(bashio::config 'bitwarden_client_secret') \
+    /usr/local/bin/bw-setup.sh 2>&1 | sed 's/^/  /' || true
+
 # ─── Export envs for hermes-webui ───────────────────────────────────────────
 export HERMES_HOME=/data/hermes
 export HERMES_INSTALL_DIR="${AGENT_DIR}"
