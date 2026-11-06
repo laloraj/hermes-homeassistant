@@ -1,5 +1,11 @@
 # Changelog
 
+## fork (laloraj) 1.10.1 — Faster Git update checks
+
+- Fix the observed Settings/About update-check timeout on an existing large partial checkout by bundling checksum-pinned Git 2.55.0 in both image build paths. A read-only comparison on the affected checkout reduced a stalled Git probe from over 25 seconds to 0.003 seconds; the complete source check finished in 1.29 seconds fresh and 0.075 seconds cached. The old Debian Git already backports no-lazy-fetch support, so this is a measured performance fix, not a claim that its version lacks that feature. Git is built in an isolated Bookworm stage against Bookworm libraries; compiler/header packages are not copied into the runtime image. HTTPS transport and normal in-place Hermes updates remain available.
+- Keep partial-clone behavior and the upstream runtime-downgrade guard intact. No custom Hermes UI or source patches, and no changes to personal data, update-channel preferences or recovery/rollback behavior.
+- Native amd64 and aarch64 image certification now requires a real blobless-clone missing-target test with no lazy fetch, plus forced and cached authenticated Settings/About update-check HTTP requests within the browser's 30-second budget using offline fixture release inputs. Cached checks must still enforce downgrade refusal.
+
 ## fork (laloraj) 1.10.0 — Webapp-only reliability release
 
 - **One Hermes UI:** the gateway Webapp is the only chat/settings interface. Removed classic WebUI installation, startup, updates, options and proxy routes. Existing `/data/hermes/webui` chats and `/data/hermes/webui-app` are kept untouched; no migration or deletion is performed. Retired bookmarks open recovery, not classic WebUI.

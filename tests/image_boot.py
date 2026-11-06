@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -34,6 +35,14 @@ source /run.sh
 env = {'HERMES_HOME': '/data/hermes', 'PATH': '/command:/usr/local/bin:/usr/bin:/bin',
        'HOME': '/root', 'TMPDIR': '/data/smoke-tmp'}
 Path(env['TMPDIR']).mkdir(parents=True, exist_ok=True)
+# Mandatory behavioral capability gate, not a skip based on the version string.
+from git_update_fixture import PartialClone
+assert subprocess.check_output(['git', '--version'], env=env, text=True).strip() == 'git version 2.55.0'
+assert Path('/usr/local/bin/git').resolve() == Path('/opt/git/bin/git')
+assert Path('/opt/git/libexec/git-core/git-remote-https').is_file()
+with tempfile.TemporaryDirectory(dir=env['TMPDIR']) as git_root:
+    PartialClone(git_root).passive_probes()
+print('PASS: image Git 2.55.0, real blobless clone, missing-target probes do not lazy-fetch')
 log = Path('/data/image-boot.log').open('w')
 process = subprocess.Popen(['/bin/bash', '-c', BOOT], env=env, stdout=log, stderr=subprocess.STDOUT,
                            start_new_session=True)
@@ -72,6 +81,10 @@ try:
         with opener.open('http://127.0.0.1:8787' + path, timeout=10) as response:
             assert response.status == 200
     assert not Path('/data/hermes/.webapp-build-failed').exists()
+    # A separate credential-free process exercises the exact Settings HTTP route
+    # with offline release inputs and the image's real mirrored source/Git/guard.
+    subprocess.run(['/opt/hermes-agent-code/venv/bin/python', '/tests/source_update_smoke.py'],
+                   env={**env, 'PYTHONPATH': '/data/hermes/agent-code'}, check=True, timeout=120)
     print('PASS: fresh image mirror, config, real Webapp build, gateway HTTP bundle, ticket, terminal, recovery')
 except Exception:
     # This fixture has no credentials; logs are safe in CI diagnostics.

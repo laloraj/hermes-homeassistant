@@ -42,6 +42,41 @@ alone is not adequate. The retag release workflow verifies **both architectures
 before pushing either version/latest image**. This smoke cannot run on an HAOS
 host without Docker; CI remains a release prerequisite.
 
+## Git and Settings/About update checks
+
+Both image paths run `hermes_assistant/build-git.sh` in an isolated Bookworm
+stage. It pins Git 2.55.0 and the kernel.org archive SHA-256; only `/opt/git`
+is copied to runtime, whose explicit Debian runtime dependencies supply HTTPS.
+Keep the version and digest together when applying upstream security updates.
+Bookworm-backports was unavailable at implementation time; do not mix newer
+Debian distribution libraries into this Bookworm image.
+
+`image_boot.py` requires the installed Git plus real filtered local-origin
+missing-target probes that neither fetch nor change the object store. The
+positive control must lazy-fetch successfully. It then runs
+`source_update_smoke.py` with the image Python and mirrored source: a separate
+credential-free loopback server exercises the actual authenticated
+`/api/hermes/update/check` route, forced and cached, each under 30 seconds.
+Only fixture root/install classification and release-network inputs are patched;
+source-check Git probes and the runtime-downgrade guard remain real. It verifies
+unknown-count update availability, cache reuse, re-evaluated cached refusal and
+local old/current schema controls. This is an offline HTTP regression, not proof
+of GitHub latency or of the owner's live Settings request.
+
+For a locally installed supported Git:
+
+```sh
+HERMES_GIT_SMOKE=1 python3 -m unittest discover -s tests -p test_git_packaging.py -v
+env -i PATH=/path/to/git/bin:/usr/local/bin:/usr/bin:/bin \
+  PYTHONPATH=/isolated/hermes/source TMPDIR=/your/scratch \
+  /supported/hermes/python tests/source_update_smoke.py
+```
+
+Do not infer `GIT_NO_LAZY_FETCH` support from the version alone: upstream
+2.39.5 and Debian's installed 2.39.5 include security backports and passed these
+offline probes. The failing old-Git control must actually lack the capability.
+The source fixture never reads credentials or edits the running installation.
+
 ## Opt-in real PM cold reconstruction
 
 ```sh

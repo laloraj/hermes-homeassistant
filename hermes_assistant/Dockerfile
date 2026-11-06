@@ -8,6 +8,11 @@
 
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 
+# Isolated Git builder uses the same Bookworm ABI as the final image.
+FROM ${BUILD_FROM} AS git-builder
+COPY build-git.sh /build-git.sh
+RUN sh /build-git.sh
+
 # ─── Stage 1 — builder ──────────────────────────────────────────────────────
 FROM ${BUILD_FROM} AS builder
 
@@ -98,6 +103,10 @@ RUN apt-get update \
         curl \
         git \
         bash \
+        libcurl4 \
+        libexpat1 \
+        libssl3 \
+        zlib1g \
         jq \
         python3 \
         python3-yaml \
@@ -112,6 +121,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring binaries + venvs from builder
+COPY --from=git-builder /opt/git /opt/git
+RUN ln -sf /opt/git/bin/git /usr/local/bin/git \
+    && ln -sf /opt/git/bin/git-upload-pack /usr/local/bin/git-upload-pack \
+    && ln -sf /opt/git/bin/git-receive-pack /usr/local/bin/git-receive-pack \
+    && ln -sf /opt/git/bin/git-shell /usr/local/bin/git-shell \
+    && /usr/local/bin/git --version
 COPY --from=builder /opt/ttyd                 /usr/local/bin/ttyd
 COPY --from=builder /usr/local/bin/uv         /usr/local/bin/uv
 COPY --from=builder /usr/local/bin/uvx        /usr/local/bin/uvx
