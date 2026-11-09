@@ -90,12 +90,12 @@ def ensure_runtime(home, source, bootstrap):
                   'tool_versions': {}, 'source_input_sha256': {}}
         atomic_json(recipe_path, recipe)
     recipe = validate(load(recipe_path))
-    for name, digest in recipe['source_input_sha256'].items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
-            raise ValueError('PM intent does not match restored source; restore matching revision first')
-    lock = load(source / 'pm/lock.json')
-    if any(lock['packages'][name]['version'] != version for name, version in recipe['tool_versions'].items()):
-        raise ValueError('PM tool intent does not match source lock')
+    # Check whether the venv PM already selected is ready to serve *before* trusting
+    # the recipe's recorded source hashes/tool versions. A source update (e.g. the
+    # Webapp's own in-app "update Hermes") can change pyproject.toml/uv.lock/pm/lock.json
+    # out from under a pm-reconstruction.json written for the prior revision; if the
+    # environment is already built and working, that stale intent must not block boot
+    # forever — refresh it from current reality instead.
     state = selection(home, source)
     if (state / 'facts.json').exists():
         selected = load(state / 'facts.json')['packages']['venv']
@@ -111,6 +111,12 @@ def ensure_runtime(home, source, bootstrap):
             # Keep legitimate later PM extras/decline changes; intent is not a permanent pin.
             export_runtime_recipe(home, source, recipe_path)
             return
+    for name, digest in recipe['source_input_sha256'].items():
+        if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
+            raise ValueError('PM intent does not match restored source; restore matching revision first')
+    lock = load(source / 'pm/lock.json')
+    if any(lock['packages'][name]['version'] != version for name, version in recipe['tool_versions'].items()):
+        raise ValueError('PM tool intent does not match source lock')
     # PM's tar extraction requires a modern bootstrap. Never patch out its filters.
     subprocess.run([bootstrap, '-c', 'import sys; sys.exit(sys.version_info < (3,12))'], check=True)
     env = {k: v for k, v in os.environ.items() if k not in ('VIRTUAL_ENV', 'PYTHONPATH', 'PYTHONHOME') and not k.startswith('HERMES_PM_')}
