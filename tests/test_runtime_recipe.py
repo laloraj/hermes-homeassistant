@@ -86,6 +86,22 @@ class RuntimeRecipe(unittest.TestCase):
                 addon_runtime.ensure_runtime(self.home, self.source, '/supported/python3.14')
             command.assert_not_called()
 
+    def test_already_ready_environment_survives_an_in_app_source_update(self):
+        """An in-app 'update Hermes' (Webapp self-update) can change pyproject.toml/
+        uv.lock/pm/lock.json without going through the snapshot-backed safe-update
+        path that refreshes pm-reconstruction.json. A stale intent's source hashes
+        must not block boot when the already-selected venv is ready to serve."""
+        (self.source / '.hermes/bin').mkdir(parents=True)
+        (self.source / '.hermes/bin/hermes').touch()
+        (self.home / 'tools/node-fixture').mkdir()
+        (self.source / 'pyproject.toml').write_text('[project]\nname="fixture"\nversion="2"\n')
+        with patch.object(addon_runtime.subprocess, 'run') as command:
+            addon_runtime.ensure_runtime(self.home, self.source, '/must-not-be-used/python')  # must not raise
+            command.assert_not_called()
+        healed = json.loads(self.recipe.read_text())
+        self.assertEqual(healed['source_input_sha256']['pyproject.toml'],
+                          hashlib.sha256((self.source / 'pyproject.toml').read_bytes()).hexdigest())
+
     def test_old_bootstrap_is_rejected_not_tar_filter_patched(self):
         with patch.object(addon_runtime.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'old-python')):
             with self.assertRaises(subprocess.CalledProcessError):

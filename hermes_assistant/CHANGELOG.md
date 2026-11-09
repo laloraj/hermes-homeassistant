@@ -1,5 +1,11 @@
 # Changelog
 
+## fork (laloraj) 1.10.3 — Survive an in-app source update, not just a drifted selection
+
+- Fix a second way the Webapp got stuck on `/recovery/` "build-failed": the Webapp's own in-app "update Hermes" prompt updates `/data/hermes/agent-code` (pyproject.toml/uv.lock/pm/lock.json) directly. That path doesn't go through `hermes-safe-update.sh`'s snapshot step that refreshes `pm-reconstruction.json`, so the recorded source hashes/tool versions go stale and `ensure_runtime` raised `PM intent does not match restored source; restore matching revision first` on every boot, with the add-on container itself still reporting "Running" the whole time.
+- `ensure_runtime` now checks whether the already-selected venv is ready to serve *before* trusting the recipe's recorded source hashes/tool versions, same as it already did for a drifted extras selection (1.10.2). If ready, it refreshes `pm-reconstruction.json` from current reality and continues instead of raising.
+- Added `test_already_ready_environment_survives_an_in_app_source_update`; full suite (47 tests, 1 pre-existing skip) passes.
+
 ## fork (laloraj) 1.10.2 — Self-heal a stale PM intent instead of crash-looping
 
 - Fix the Webapp getting permanently stuck on the `/recovery/` "build-failed" page after `pm-reconstruction.json` (the recorded package-selection intent) drifted from the venv PM actually rebuilt — e.g. intent recorded `extras: []` while the real installed venv had `extras: ["all"]`. `ensure_runtime` only ever regenerated that file when it was *missing*, so once it went stale it re-raised `PM rebuilt extras do not match intent` on every boot forever, with no automatic recovery.
