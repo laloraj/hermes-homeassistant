@@ -59,6 +59,26 @@ class RuntimeRecipe(unittest.TestCase):
         self.assertEqual(calls[2][1]['env']['HERMES_RUNTIME_DIR'], str(self.home / 'tools'))
         self.assertEqual(json.loads((self.state / 'declined-extras.json').read_text())['declined'], ['speech'])
 
+    def test_stale_intent_self_heals_from_rebuilt_venv(self):
+        """pm-reconstruction.json can drift (e.g. hand-edited, or a prior run that
+        recorded extras before PM actually reconciled them). Once PM has rebuilt
+        the venv, its selected extras are ground truth: adopt them into intent
+        instead of crash-looping the add-on on every boot forever."""
+        data = json.loads(self.recipe.read_text())
+        data['extras'] = []
+        self.recipe.write_text(json.dumps(data))
+
+        def run(args, **kwargs):
+            if args[1:3] == ['-m', 'pm.cli']:
+                # PM did not converge to the stale empty-extras intent; the venv
+                # still has its previously-installed extras.
+                return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(addon_runtime.subprocess, 'run', side_effect=run):
+            addon_runtime.ensure_runtime(self.home, self.source, '/supported/python3.14')  # must not raise
+        healed = json.loads(self.recipe.read_text())
+        self.assertEqual(healed['extras'], ['messaging', 'web'])
+
     def test_source_mismatch_fails_before_network_or_environment_changes(self):
         (self.source / 'pyproject.toml').write_text('wrong revision')
         with patch.object(addon_runtime.subprocess, 'run') as command:

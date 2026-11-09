@@ -1,5 +1,5 @@
 name: "Hermes Assistant (fork: +HA config/addons access)"
-version: "1.10.1"
+version: "1.10.2"
 slug: hermes_assistant
 description: "[FORK of nuttaruj/hermes-homeassistant] Hermes AI Agent (NousResearch) with the gateway Webapp and independent recovery terminal. This fork additionally maps the real HA /config and /addons folders into the container."
 url: https://github.com/laloraj/hermes-homeassistant

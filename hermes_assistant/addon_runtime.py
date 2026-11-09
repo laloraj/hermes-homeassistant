@@ -124,7 +124,11 @@ def ensure_runtime(home, source, bootstrap):
     command([flag for extra in recipe['extras'] for flag in ('--extra', extra)])
     selected = load(state / 'facts.json')['packages']['venv']
     if sorted(selected['extras']) != sorted(recipe['extras']):
-        raise ValueError('PM rebuilt extras do not match intent')
+        # A previously-written pm-reconstruction.json can drift from the venv PM
+        # actually rebuilt (e.g. stale intent recorded before extras changed).
+        # The rebuilt venv is ground truth: adopt it into intent instead of
+        # crash-looping the add-on forever on every future boot.
+        export_runtime_recipe(home, source, recipe_path)
 
 
 def main():
