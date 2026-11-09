@@ -1,5 +1,11 @@
 # Changelog
 
+## fork (laloraj) 1.10.2 — Self-heal a stale PM intent instead of crash-looping
+
+- Fix the Webapp getting permanently stuck on the `/recovery/` "build-failed" page after `pm-reconstruction.json` (the recorded package-selection intent) drifted from the venv PM actually rebuilt — e.g. intent recorded `extras: []` while the real installed venv had `extras: ["all"]`. `ensure_runtime` only ever regenerated that file when it was *missing*, so once it went stale it re-raised `PM rebuilt extras do not match intent` on every boot forever, with no automatic recovery.
+- `ensure_runtime` now treats the rebuilt venv's actual selected extras as ground truth on a post-install mismatch: it re-exports `pm-reconstruction.json` from the real state and continues, instead of raising. A manual recovery previously required deleting `pm-reconstruction.json` by hand in the recovery Terminal and restarting the add-on; this is no longer necessary.
+- No changes to extras/decline semantics, source-hash/tool-version verification, or the pre-PM snapshot-upgrade path — only the final post-rebuild comparison self-heals instead of failing hard.
+
 ## fork (laloraj) 1.10.1 — Faster Git update checks
 
 - Fix the observed Settings/About update-check timeout on an existing large partial checkout by bundling checksum-pinned Git 2.55.0 in both image build paths. A read-only comparison on the affected checkout reduced a stalled Git probe from over 25 seconds to 0.003 seconds; the complete source check finished in 1.29 seconds fresh and 0.075 seconds cached. The old Debian Git already backports no-lazy-fetch support, so this is a measured performance fix, not a claim that its version lacks that feature. Git is built in an isolated Bookworm stage against Bookworm libraries; compiler/header packages are not copied into the runtime image. HTTPS transport and normal in-place Hermes updates remain available.
