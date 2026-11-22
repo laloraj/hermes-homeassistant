@@ -1,5 +1,11 @@
 # Changelog
 
+## fork (laloraj) 1.10.4 — Updates can no longer block boot over stale PM pins
+
+- Third fix for the same symptom (gateway/Webapp not starting after an in-app Hermes update until `pm-reconstruction.json` was deleted by hand). 1.10.3 only skipped the check when the old venv was still ready; when the update changed the source/tool lock *and* the venv needed rebuilding, `ensure_runtime` still raised `PM intent does not match restored source`.
+- Source hashes and tool versions in `pm-reconstruction.json` are now treated as derived data: on mismatch, `ensure_runtime` keeps the user's extras/declines, takes tool versions from the current `pm/lock.json`, rebuilds, and always re-exports the recipe from the rebuilt environment. It no longer raises on source/tool/extras drift.
+- Replaced the old "mismatch fails" test with `test_source_and_tool_change_rebuilds_and_refreshes_intent`; full suite passes (47 tests, 1 skip).
+
 ## fork (laloraj) 1.10.3 — Survive an in-app source update, not just a drifted selection
 
 - Fix a second way the Webapp got stuck on `/recovery/` "build-failed": the Webapp's own in-app "update Hermes" prompt updates `/data/hermes/agent-code` (pyproject.toml/uv.lock/pm/lock.json) directly. That path doesn't go through `hermes-safe-update.sh`'s snapshot step that refreshes `pm-reconstruction.json`, so the recorded source hashes/tool versions go stale and `ensure_runtime` raised `PM intent does not match restored source; restore matching revision first` on every boot, with the add-on container itself still reporting "Running" the whole time.
