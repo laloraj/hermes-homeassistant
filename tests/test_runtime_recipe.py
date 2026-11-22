@@ -79,12 +79,23 @@ class RuntimeRecipe(unittest.TestCase):
         healed = json.loads(self.recipe.read_text())
         self.assertEqual(healed['extras'], ['messaging', 'web'])
 
-    def test_source_mismatch_fails_before_network_or_environment_changes(self):
-        (self.source / 'pyproject.toml').write_text('wrong revision')
-        with patch.object(addon_runtime.subprocess, 'run') as command:
-            with self.assertRaisesRegex(ValueError, 'restored source'):
-                addon_runtime.ensure_runtime(self.home, self.source, '/supported/python3.14')
-            command.assert_not_called()
+    def test_source_and_tool_change_rebuilds_and_refreshes_intent(self):
+        """In-app update: new source hashes AND new tool versions, venv not ready.
+        Must rebuild from the new lock (not raise) and re-export intent."""
+        (self.source / 'pyproject.toml').write_text('new revision')
+        (self.source / 'pm/lock.json').write_text(json.dumps({'packages': {'node': {'version': '24.0'}}}))
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(addon_runtime.subprocess, 'run', side_effect=run):
+            addon_runtime.ensure_runtime(self.home, self.source, '/supported/python3.14')
+        self.assertEqual(calls[1][1:], ['-m', 'pm.cli', 'install', 'node'])
+        healed = json.loads(self.recipe.read_text())
+        self.assertEqual(healed['tool_versions'], {'node': '22.1'})  # re-exported from tools/facts.json
+        self.assertEqual(healed['source_input_sha256']['pyproject.toml'],
+                         hashlib.sha256(b'new revision').hexdigest())
+        self.assertEqual(healed['extras'], ['messaging', 'web'])
 
     def test_already_ready_environment_survives_an_in_app_source_update(self):
         """An in-app 'update Hermes' (Webapp self-update) can change pyproject.toml/

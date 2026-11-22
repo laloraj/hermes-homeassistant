@@ -111,12 +111,14 @@ def ensure_runtime(home, source, bootstrap):
             # Keep legitimate later PM extras/decline changes; intent is not a permanent pin.
             export_runtime_recipe(home, source, recipe_path)
             return
-    for name, digest in recipe['source_input_sha256'].items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
-            raise ValueError('PM intent does not match restored source; restore matching revision first')
+    # Source/tool pins are derived data, not user intent. An update (in-app, safe-update
+    # or restore) legitimately changes the checkout, so never refuse to boot over them:
+    # keep the user's extras/declines, take tool versions from the current source lock,
+    # rebuild, and re-export the recipe afterwards.
     lock = load(source / 'pm/lock.json')
-    if any(lock['packages'][name]['version'] != version for name, version in recipe['tool_versions'].items()):
-        raise ValueError('PM tool intent does not match source lock')
+    recipe['tool_versions'] = {name: lock['packages'][name]['version'] for name in recipe['tool_versions']
+                               if lock.get('packages', {}).get(name, {}).get('version')}
+    recipe['source_input_sha256'] = {}
     # PM's tar extraction requires a modern bootstrap. Never patch out its filters.
     subprocess.run([bootstrap, '-c', 'import sys; sys.exit(sys.version_info < (3,12))'], check=True)
     env = {k: v for k, v in os.environ.items() if k not in ('VIRTUAL_ENV', 'PYTHONPATH', 'PYTHONHOME') and not k.startswith('HERMES_PM_')}
@@ -128,13 +130,9 @@ def ensure_runtime(home, source, bootstrap):
     state.mkdir(parents=True, exist_ok=True)
     atomic_json(state / 'declined-extras.json', {'schema': 1, 'declined': recipe['declined_extras']})
     command([flag for extra in recipe['extras'] for flag in ('--extra', extra)])
-    selected = load(state / 'facts.json')['packages']['venv']
-    if sorted(selected['extras']) != sorted(recipe['extras']):
-        # A previously-written pm-reconstruction.json can drift from the venv PM
-        # actually rebuilt (e.g. stale intent recorded before extras changed).
-        # The rebuilt venv is ground truth: adopt it into intent instead of
-        # crash-looping the add-on forever on every future boot.
-        export_runtime_recipe(home, source, recipe_path)
+    # The rebuilt venv is ground truth: always adopt it (new source hashes, tool versions,
+    # extras) into intent instead of crash-looping the add-on on every future boot.
+    export_runtime_recipe(home, source, recipe_path)
 
 
 def main():
